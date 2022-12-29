@@ -724,6 +724,14 @@ def set_node_attrs_on_tree(data_json, node_attrs):
             else:
                 node["branch_attrs"]["labels"] = { "clade": raw_data["clade_annotation"] }
 
+    # The following takes branch length and adds as a label in the json file
+    def _transfer_branch_lengths(node, raw_data):
+        if "branch_length" in raw_data and is_valid(raw_data["branch_length"]):
+            if 'labels' in node["branch_attrs"]:
+                node["branch_attrs"]["labels"]['#snps'] = raw_data["branch_length"]
+            else:
+                node["branch_attrs"]["labels"] = { "#snps": raw_data["branch_length"] }
+
     def _transfer_hidden_flag(node, raw_data):
         hidden = raw_data.get("hidden", None)
         if hidden:
@@ -775,6 +783,7 @@ def set_node_attrs_on_tree(data_json, node_attrs):
         _transfer_mutations(node, raw_data)
         _transfer_vaccine_info(node, raw_data)
         _transfer_labels(node, raw_data)
+        _transfer_branch_lengths(node, raw_data) # add branch length as label
         _transfer_hidden_flag(node, raw_data)
         _transfer_num_date(node, raw_data)
         _transfer_url_accession(node, raw_data)
