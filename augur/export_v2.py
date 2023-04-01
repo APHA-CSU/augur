@@ -846,9 +846,9 @@ def set_node_attrs_on_tree(data_json, node_attrs, additional_metadata_columns):
     def _transfer_branch_lengths(node, raw_data):
         if "branch_length" in raw_data and is_valid(raw_data["branch_length"]):
             if 'labels' in node["branch_attrs"]:
-                node["branch_attrs"]["labels"]['#snps'] = raw_data["branch_length"]
+                node["branch_attrs"]["labels"]['snps'] = raw_data["branch_length"]
             else:
-                node["branch_attrs"]["labels"] = { "#snps": raw_data["branch_length"] }
+                node["branch_attrs"]["labels"] = { "snps": raw_data["branch_length"] }
 
     def _transfer_hidden_flag(node, raw_data):
         hidden = raw_data.get("hidden", None)
