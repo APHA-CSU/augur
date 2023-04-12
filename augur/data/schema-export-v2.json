@@ -293,7 +293,7 @@
                             "description": "Node labels",
                             "$comment": "Auspice scans this to generate the branch labels dropdown",
                             "patternProperties": {
-                                "^[a-zA-Z0-9]+$": {
+                                "^[0-9]+$": {
                                     "$comment": "e.g. clade->3c3a",
                                     "$comment": "string is parsed unchanged by Auspice",
                                     "type": "string"
