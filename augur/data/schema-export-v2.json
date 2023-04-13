@@ -294,8 +294,8 @@
                             "$comment": "Auspice scans this to generate the branch labels dropdown",
                             "patternProperties": {
                                 "^[0-9]+$": {
-                                    "$comment": "e.g. clade->3c3a",
-                                    "$comment": "string is parsed unchanged by Auspice",
+                                    "$comment": "simple integer for number of snps",
+                                    "$comment": "number is parsed as string, unchanged by Auspice",
                                     "type": "string"
                                 },
                                 "^none$": false
