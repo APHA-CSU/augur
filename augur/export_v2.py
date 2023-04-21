@@ -416,8 +416,8 @@ def set_colorings(data_json, config, command_line_colorings, metadata_names, nod
         # note that invalid options will be pruned out later
         # it is here that we deal with the interplay between node-data "traits", command line colorings &
         # config provided options
-        auto_colorings = [name for name in node_data_colorings
-                          if node_data_prop_is_normal_trait(name) and name not in metadata_names]
+        # auto_colorings = [name for name in node_data_colorings
+        #                  if node_data_prop_is_normal_trait(name) and name not in metadata_names]
 
         colorings = []
         # If we have command line colorings, it seems we (a) ignore any provided in the config file
@@ -425,8 +425,8 @@ def set_colorings(data_json, config, command_line_colorings, metadata_names, nod
         # type will be accessed from the config file if available)
         if command_line_colorings:
             # start with auto_colorings (already validated to be included)
-            for x in auto_colorings:
-                _add_coloring(colorings, x)
+            #for x in auto_colorings:
+            #    colorings.append(_create_coloring(x))
             # then add in command line colorings
             for x in command_line_colorings:
                 _add_coloring(colorings, x)
@@ -436,17 +436,17 @@ def set_colorings(data_json, config, command_line_colorings, metadata_names, nod
                 for x in config.keys():
                     _add_coloring(colorings, x)
             # then add in any auto-colorings already validated to include
-            for x in auto_colorings:
-                _add_coloring(colorings, x)
+            #for x in auto_colorings:
+            #    colorings.append(_create_coloring(x))
 
-        explicitly_defined_colorings = [x["key"] for x in colorings]
+        #explicitly_defined_colorings = [x["key"] for x in colorings]
         # add in genotype as a special case if (a) not already set and (b) the data supports it
-        if "gt" not in explicitly_defined_colorings and are_mutations_defined(branch_attrs):
-            colorings.insert(0,{'key':'gt'})
-        if "num_date" not in explicitly_defined_colorings and is_node_attr_defined(node_attrs, "num_date"):
-            colorings.insert(0,{'key':'num_date'})
-        if "clade_membership" not in explicitly_defined_colorings and is_node_attr_defined(node_attrs, "clade_membership"):
-            colorings.insert(0,{'key':'clade_membership'})
+        #if "gt" not in explicitly_defined_colorings and are_mutations_defined(node_attrs):
+        #    colorings.insert(0,{'key':'gt'})
+        #if "num_date" not in explicitly_defined_colorings and are_dates_defined(node_attrs):
+        #    colorings.insert(0,{'key':'num_date'})
+        #if "clade_membership" not in explicitly_defined_colorings and are_clades_defined(node_attrs):
+        #    colorings.insert(0,{'key':'clade_membership'})
 
         return colorings
 
