@@ -183,7 +183,7 @@
                     "description": "What branch label should be displayed by default, or 'none' to hide labels by default.",
                     "$comment": "Should be a key present in the per-node branch_attrs.labels object of the exported JSON; pattern is from the schema for that object",
                     "type": "string",
-                    "pattern": "^(none|[a-zA-Z0-9]+)$"
+                    "pattern": "^(none|[a-zA-Z0-9 ]+)$"
                 },
                 "tip_label": {
                   "description": "What tip label should be displayed by default, or 'none' to hide labels by default.",

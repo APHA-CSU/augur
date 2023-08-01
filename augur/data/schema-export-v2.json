@@ -107,7 +107,77 @@
                     }
                 },
                 "display_defaults": {
-                    "$ref": "https://nextstrain.org/schemas/auspice/config/v2#/properties/display_defaults"
+                    "description": "Set the defaults for certain display options in Auspice. All are optional.",
+                    "$comment": "Anything able to be encoded in the auspice URL should be an option here, so this will expand over time",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "geo_resolution": {
+                            "description": "Default geographic resolution",
+                            "$comment": "The value here must be present in the geo object (see above)",
+                            "type": "string"
+                        },
+                        "color_by": {
+                            "description": "Default color by",
+                            "$comment": "The value here must be present in the colorings object (see above)",
+                            "type": "string"
+                        },
+                        "distance_measure": {
+                            "description": "Default tree metric",
+                            "type": "string",
+                            "enum": ["div", "num_date"]
+                        },
+                        "layout": {
+                          "description": "Default tree layout",
+                          "type": "string",
+                          "enum": ["rect", "radial", "unrooted", "clock"]
+                        },
+                        "map_triplicate": {
+                            "description": "Should the map be extended / wrapped around. Useful if transmissions are worldwide.",
+                            "type": "boolean"
+                        },
+                        "branch_label": {
+                            "description": "What branch label should be displayed by default, or 'none' to hide labels by default.",
+                            "$comment": "Should be a key present in the per-node branch_attrs.labels object of the exported JSON; pattern is from the schema for that object",
+                            "type": "string",
+                            "pattern": "^(none|[a-zA-Z0-9 ]+)$"
+                        },
+                        "transmission_lines": {
+                            "description": "Should transmission lines (if available) be displaye by default",
+                            "type": "boolean"
+                        },
+                        "language": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "A BCP 47 language tag specifying the default language in which to display Auspice's interface (if supported)"
+                        },
+                        "sidebar": {
+                            "type": "string",
+                            "enum": ["open", "closed"]
+                        },
+                        "panels": {
+                            "type": "array",
+                            "description": "The panels to display by default.",
+                            "$comment": "optional, but if present must not be empty",
+                            "minItems": 1,
+                            "items": {
+                                "type": "string",
+                                "enum": ["tree", "map", "frequencies", "entropy"]
+                            }
+                        }
+                    }
+                },
+                "tree_name" : {
+                  "description": "The name of the tree (e.g. segment name), if applicable",
+                  "$comment": "This is required if you want to view two trees side-by-side",
+                  "$comment": "It should match a field in the JSON filename after splitting on '_'",
+                  "$comment": "e.g. `flu_h3n2_ha_3y` has a tree name of `ha`",
+                  "type": "string"
+                },
+                "frequencies": {
+                    "$comment": "Frequencies could be specified here if desired",
+                    "$comment": "If not specified, and frequencies are asked for in #/panels, then Auspice will attempt to fetch a seperate JSON",
+                    "$comment": "cc John / Trevor"
                 },
                 "data_provenance": {
                     "$ref": "https://nextstrain.org/schemas/auspice/config/v2#/properties/data_provenance"
