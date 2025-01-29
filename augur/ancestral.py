@@ -38,7 +38,7 @@ from collections import defaultdict
 from .argparse_ import add_validation_arguments
 from .util_support.node_data_file import NodeDataObject
 
-def ancestral_sequence_inference(tree=None, aln=None, ref=None, infer_gtr=False,
+def ancestral_sequence_inference(tree=None, aln=None, ref=None, infer_gtr=True,
                                  marginal=False, fill_overhangs=True, infer_tips=False,
                                  alphabet='nuc', rng_seed=None):
     """infer ancestral sequences using TreeTime
