@@ -110,7 +110,6 @@ jobs:
     strategy:
       matrix:
         pathogen:
-          - dengue
           - lassa
           - measles
           - mpox
@@ -119,7 +118,6 @@ jobs:
           - seasonal-cov
           - wnv
           - yellow-fever
-          - zika
 
     name: pathogen-repo-ci (${{ matrix.pathogen }})
     defaults:
