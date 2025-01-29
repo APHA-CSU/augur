@@ -1,19 +1,33 @@
 """
 Export version 2 JSON schema for visualization with Auspice
 """
+import os
 from pathlib import Path
-import os, sys
+import sys
 import time
 from collections import defaultdict, deque, OrderedDict
 import warnings
 import numbers
+import math
 import re
 from Bio import Phylo
+from typing import Dict, Union, TypedDict, Any, Tuple
 
-from .argparse_ import ExtendAction
-from .io.metadata import read_metadata
-from .utils import read_node_data, write_json, read_config, read_lat_longs, read_colors
+from .argparse_ import ExtendOverwriteDefault, add_validation_arguments
+from .errors import AugurError
+from .io.file import open_file
+from .io.metadata import DEFAULT_DELIMITERS, DEFAULT_ID_COLUMNS, InvalidDelimiter, read_metadata
+from .types import ValidationMode
+from .utils import read_node_data, write_json, json_size, read_config, read_lat_longs, read_colors
 from .validate import export_v2 as validate_v2, auspice_config_v2 as validate_auspice_config_v2, ValidateError
+from .version import __version__
+
+
+MINIFY_THRESHOLD_MB = 5
+
+# Invalid metadata columns because they are used internally by Auspice
+INVALID_METADATA_COLUMNS = ("none")
+
 
 # Set up warnings & exceptions
 warn = warnings.warn
@@ -109,64 +123,75 @@ def orderKeys(data):
         order_nodes(od['tree'])
     return od
 
-def convert_tree_to_json_structure(node, metadata, div=0):
+
+def node_div(T, node_attrs):
+    """
+    Scans the provided tree & metadata to see if divergence is defined, and if so returns
+    a function which gets it from individual nodes. Divergence may be defined via a number
+    of sources, and we pick them in the following order:
+    * metadata.mutation_length (typically via `augur refine`)
+    * metadata.branch_length (typically via `augur refine`)
+    * Branch lengths encoded in the Newick tree
+
+    Returns either:
+    * function with arguments: (node, metadata_for_node) which returns the node divergence
+    * None (indicates that divergence is not available for this dataset)
+    """
+    if all(('mutation_length' in node_attrs[n.name] for n in T.root.find_clades())):
+        return lambda node, metadata: metadata['mutation_length']
+    if all(('branch_length' in node_attrs[n.name] for n in T.root.find_clades())):
+        return lambda node, metadata: metadata['branch_length']
+    if T.root.branch_length is not None:
+        return lambda node, metadata: node.branch_length
+    return None
+
+def convert_tree_to_json_structure(node, metadata, get_div, div=0):
     """
     converts the Biopython tree structure to a dictionary that can
     be written to file as a json. This is called recursively.
-    Creates the name property & divergence on each node
 
-    input
-        node -- node for which top level dict is produced.
-        div  -- cumulative divergence (root = 0). False → divergence won't be exported.
+    Parameters
+    ----------
+    node : Bio.Phylo.Newick.Clade
+    metadata : dict
+        Per-node metadata, with keys matching `node.name`
+    get_div :
+        (None or function)
+        Function returns divergence for this node. Arguments: (node, metadata_for_node)
+        If None then divergence is not defined for this dataset and so 'div' is not set on returned nodes.
+    div : int
+        cumulative divergence leading to the current node (root = 0)
 
-    returns
-        tree in JSON structure
-        list of strains
+    Returns
+    -------
+    dict:
+        See schema-export-v2.json#/$defs/tree for full details.
+        Node names are always set, and divergence is set if applicable
     """
-
-    # Does the tree have divergence? (BEAST trees may not)
-    # only calculate this for the root node!
-    if div == 0 and 'mutation_length' not in metadata[node.name] and 'branch_length' not in metadata[node.name]:
-        div = False
-
     node_struct = {'name': node.name, 'node_attrs': {}, 'branch_attrs': {}}
-    if div is not False: # div=0 is ok
-        node_struct["node_attrs"]["div"] = div
+
+    if get_div is not None: # Store the (cumulative) observed divergence prior to this node
+        node_struct["node_attrs"]["div"] = format_number(div)
 
     if node.clades:
         node_struct["children"] = []
         for child in node.clades:
-            if div is False:
-                cdiv=False
-            else:
-                if 'mutation_length' in metadata[child.name]:
-                    cdiv = div + metadata[child.name]['mutation_length']
-                elif 'branch_length' in metadata[child.name]:
-                    cdiv = div + metadata[child.name]['branch_length']
-                else:
-                    print("ERROR: Cannot find branch length information for %s"%(child.name))
-
-            node_struct["children"].append(convert_tree_to_json_structure(child, metadata, div=cdiv))
+            cdiv = div
+            if get_div:
+                cdiv += get_div(child, metadata[child.name])
+            node_struct["children"].append(convert_tree_to_json_structure(child, metadata, get_div, div=cdiv))
 
     return node_struct
 
-def are_mutations_defined(node_attrs):
-    for node, data in node_attrs.items():
-        if data.get("aa_muts") or data.get("muts"):
+def are_mutations_defined(branch_attrs):
+    for branch in branch_attrs.values():
+        if branch.get("mutations"):
             return True
     return False
 
-
-def are_clades_defined(node_attrs):
+def is_node_attr_defined(node_attrs, attr_name):
     for node, data in node_attrs.items():
-        if data.get("clade_membership") or data.get("clade_annotation"):
-            return True
-    return False
-
-
-def are_dates_defined(node_attrs):
-    for node, data in node_attrs.items():
-        if data.get("num_date"):
+        if data.get(attr_name):
             return True
     return False
 
@@ -222,7 +247,7 @@ def get_config_colorings_as_dict(config):
     return config_colorings
 
 
-def set_colorings(data_json, config, command_line_colorings, metadata_names, node_data_colorings, provided_colors, node_attrs):
+def set_colorings(data_json, config, command_line_colorings, metadata_names, node_data_colorings, provided_colors, node_attrs, branch_attrs):
 
     def _get_type(key, trait_values):
         # for some keys we know what the type must be
@@ -361,21 +386,27 @@ def set_colorings(data_json, config, command_line_colorings, metadata_names, nod
             return False # a warning message will have been printed before `InvalidOption` is raised
         return coloring
 
-    def _create_coloring(key):
+    def _add_coloring(colorings, key):
         # handle deprecations
         if key == "authors":
             deprecated("[colorings] The 'authors' key is now called 'author'")
             key = "author"
-        return {"key": key}
+        # check if the key has already been added by another part of the color-creating logic
+        if key not in {x['key'] for x in colorings}:
+            colorings.append({"key": key})
 
     def _is_valid(coloring):
         key = coloring["key"]
         trait_values = get_values_across_nodes(node_attrs, key) # e.g. list of countries, regions etc
-        if key == "gt" and not are_mutations_defined(node_attrs):
+        if key == "gt" and not are_mutations_defined(branch_attrs):
             warn("[colorings] You asked for mutations (\"gt\"), but none are defined on the tree. They cannot be used as a coloring.")
             return False
         if key != "gt" and not trait_values:
-            warn("You asked for a color-by for trait '{}', but it has no values on the tree. It has been ignored.".format(key))
+            warn(f"Requested color-by field {key!r} does not exist and will not be used as a coloring or exported.")
+            return False
+        if key in INVALID_METADATA_COLUMNS:
+            warn(f"You asked for a color-by for trait {key!r}, but this is an invalid coloring key.\n"
+                  "It will be ignored during export, please rename field if you would like to use it as a coloring.")
             return False
         return True
 
@@ -398,12 +429,12 @@ def set_colorings(data_json, config, command_line_colorings, metadata_names, nod
             #    colorings.append(_create_coloring(x))
             # then add in command line colorings
             for x in command_line_colorings:
-                colorings.append(_create_coloring(x))
+                _add_coloring(colorings, x)
         else:
             # if we have a config file, start with these (extra info, such as title&type, is added in later)
             if config:
                 for x in config.keys():
-                    colorings.append(_create_coloring(x))
+                    _add_coloring(colorings, x)
             # then add in any auto-colorings already validated to include
             #for x in auto_colorings:
             #    colorings.append(_create_coloring(x))
@@ -522,7 +553,11 @@ def set_filters(data_json, config):
                       if coloring["type"] != "continuous" and coloring["key"] != 'gt'}
         data_json['meta']['filters'] = list(potentials)
 
-def validate_data_json(filename):
+def validate_data_json(filename, validation_mode=ValidationMode.ERROR):
+    if validation_mode is ValidationMode.SKIP:
+        print(f"Skipping validation of produced JSON due to --validation-mode={validation_mode.value} or --skip-validation.")
+        return
+
     print("Validating produced JSON")
     try:
         validate_v2(main_json=filename)
@@ -531,7 +566,18 @@ def validate_data_json(filename):
         print("\n------------------------")
         print("Validation of {} failed. Please check this in a local instance of `auspice`, as it is not expected to display correctly. ".format(filename))
         print("------------------------")
+        validation_failure(validation_mode)
+
+def validation_failure(mode: ValidationMode):
+    if mode is ValidationMode.ERROR:
         sys.exit(2)
+    elif mode is ValidationMode.WARN:
+        print(f"Continuing due to --validation-mode={mode.value} even though there were validation errors.")
+    elif mode is ValidationMode.SKIP:
+        # Shouldn't be doing validation under skip, but if we're called anyway just do nothing.
+        return
+    else:
+        raise ValueError(f"unknown validation mode: {mode!r}")
 
 
 def set_panels(data_json, config, cmd_line_panels):
@@ -568,7 +614,8 @@ def set_data_provenance(data_json, config):
     config : dict
         config JSON with an expected ``data_provenance`` key
 
-
+    Examples
+    --------
     >>> config = {"data_provenance": [{"name": "GISAID"}, {"name": "INSDC"}]}
     >>> data_json = {"meta": {}}
     >>> set_data_provenance(data_json, config)
@@ -584,6 +631,8 @@ def counter_to_disambiguation_suffix(count):
     """Given a numeric count of author papers, return a distinct alphabetical
     disambiguation suffix.
 
+    Examples
+    --------
     >>> counter_to_disambiguation_suffix(0)
     'A'
     >>> counter_to_disambiguation_suffix(25)
@@ -683,46 +732,123 @@ def create_author_data(node_attrs):
 
     return node_author_info
 
+def set_branch_attrs_on_tree(data_json, branch_attrs):
+    """
+    Shifts the provided `branch_attrs` onto the (auspice) `data_json`.
+    Currently all data is transferred, there is no way for (e.g.) the set of exported
+    labels to be restricted by the user in a config.
+    """
+    def _recursively_set_data(node):
+        if branch_attrs.get(node['name'], {}):
+            node['branch_attrs'] = branch_attrs[node['name']]
+        for child in node.get("children", []):
+            _recursively_set_data(child)
+    _recursively_set_data(data_json["tree"])
 
-def set_node_attrs_on_tree(data_json, node_attrs):
+def is_numeric(n:Any) -> bool:
+    # Typing a number is surprisingly hard in python, and `number.Number`
+    # doesn't work nicely with type hints. See <https://stackoverflow.com/a/73186301>
+    return isinstance(n, (int, float))
+
+def format_number(n: Union[int, float]) -> Union[int, float]:
+    if isinstance(n, int) or n==0:
+        return n
+    # We want to use three sig figs for the fractional part of the float, while
+    # preserving all the data in the integral (integer) part. We leverage the
+    # fact that python floats (incl scientific notation) storing the shortest
+    # decimal string that’s guaranteed to round back to x. Note that this means we
+    # drop trailing zeros, so it's not _quite_ sig figs.
+    integral = int(abs(n))
+    significand = math.floor(math.log10(integral))+1 if integral!=0 else 0
+    return float(f"{n:.{significand+3}g}")
+
+
+class ConfidenceNumeric(TypedDict):
+    # the python type is a tuple, but when serialised to JSON this is an array
+    confidence: Tuple[Union[int,float], Union[int,float]]
+
+class ConfidenceCategorical(TypedDict):
+    confidence: Dict[str,Union[int,float]]
+    entropy: float
+
+class EmptyDict(TypedDict):
+    """Empty dict for typing."""
+
+def attr_confidence(
+    node_name: str,
+    attrs: dict,
+    key: str,
+) -> Union[EmptyDict, ConfidenceNumeric, ConfidenceCategorical]:
+    """
+    Extracts and formats the confidence & entropy keys from the provided node-data attrs
+    If there is no confidence-related information an empty dict is returned.
+    If the information appears incorrect / incomplete, a warning is printed and an empty dict returned.
+    """
+    conf_key = f"{key}_confidence"
+    conf = attrs.get(conf_key, None)
+    if conf is None:
+        return {}
+
+    if isinstance(conf, list):
+        if len(conf)!=2:
+            warn(f"[confidence] node {node_name!r} specifies {conf_key!r} as a list of {len(conf)} values, not 2. Skipping confidence export.")
+            return {}
+        return {"confidence": (format_number(conf[0]), format_number(conf[1]))}
+
+    if isinstance(conf, dict):
+        entropy = attrs.get(f"{key}_entropy", None)
+        if not entropy or not is_numeric(entropy):
+            warn(f"[confidence] node {node_name!r} includes a mapping of confidence values but not an associated numeric entropy value. Skipping confidence export.")
+            return {}
+        if not all([is_numeric(v) for v in conf.values()]):
+            warn(f"[confidence] node {node_name!r} includes a mapping of confidence values but they are not all numeric. Skipping confidence export.")
+            return {}
+        # While most of the time confidences come from `augur traits` which already sorts the values, we sort them (again) here
+        # and only take confidence values over .1% and the top 4 elements.
+        # To minimise the JSON size we only print values to 3 s.f. which is enough for Auspice
+        conf = {
+            key:format_number(conf[key]) for key in
+            sorted(list(conf.keys()), key=lambda x: conf[x], reverse=True)
+            if conf[key]>0.001
+        }
+        return {"confidence": conf, "entropy": format_number(entropy)}
+
+    warn(f"[confidence] {key+'_confidence'!r} is of an unknown format. Skipping.")
+    return {}
+
+
+
+def set_node_attrs_on_tree(data_json, node_attrs, additional_metadata_columns):
     '''
-    Assign desired colorings, metadata etc to the tree structure
+    Assign desired colorings, metadata etc to the `node_attrs` of nodes in the tree
 
     Parameters
     ----------
     data_json : dict
     node_attrs: dict
         keys: strain names. values: dict with keys -> all available metadata (even "excluded" keys), values -> data (string / numeric / bool)
+    additional_metadata_columns: list
+        Requested additional metadata columns to export
     '''
 
     author_data = create_author_data(node_attrs)
 
-    def _transfer_mutations(node, raw_data):
-        if "aa_muts" in raw_data or "muts" in raw_data:
-            node["branch_attrs"]["mutations"] = {}
-            if "muts" in raw_data and len(raw_data["muts"]):
-                node["branch_attrs"]["mutations"]["nuc"] = raw_data["muts"]
-            if "aa_muts" in raw_data:
-                aa = {gene:data for gene, data in raw_data["aa_muts"].items() if len(data)}
-                node["branch_attrs"]["mutations"].update(aa)
-                #convert mutations into a label
-                if aa:
-                    aa_lab = '; '.join("{!s}: {!s}".format(key,', '.join(val)) for (key,val) in aa.items())
-                    if 'labels' in node["branch_attrs"]:
-                        node["branch_attrs"]["labels"]["aa"] = aa_lab
-                    else:
-                        node["branch_attrs"]["labels"] = { "aa": aa_lab }
+    def _transfer_additional_metadata_columns(node, raw_data):
+        for col in additional_metadata_columns:
+            if is_valid(raw_data.get(col, None)):
+                node["node_attrs"][col] = {"value": raw_data[col]}
 
     def _transfer_vaccine_info(node, raw_data):
         if raw_data.get("vaccine"):
             node["node_attrs"]['vaccine'] = raw_data['vaccine']
 
-    def _transfer_labels(node, raw_data):
-        if "clade_annotation" in raw_data and is_valid(raw_data["clade_annotation"]):
+    # The following takes branch length and adds as a label in the json file
+    def _transfer_branch_lengths(node, raw_data):
+        if "branch_length" in raw_data and is_valid(raw_data["branch_length"]):
             if 'labels' in node["branch_attrs"]:
-                node["branch_attrs"]["labels"]['clade'] = raw_data["clade_annotation"]
+                node["branch_attrs"]["labels"]['SNP Distance'] = raw_data["branch_length"]
             else:
-                node["branch_attrs"]["labels"] = { "clade": raw_data["clade_annotation"] }
+                node["branch_attrs"]["labels"] = { "SNP Distance": raw_data["branch_length"] }
 
     # The following takes branch length and adds as a label in the json file
     def _transfer_branch_lengths(node, raw_data):
@@ -747,9 +873,8 @@ def set_node_attrs_on_tree(data_json, node_attrs):
             raw_data["num_date"] = raw_data["numdate"]
             del raw_data["numdate"]
         if is_valid(raw_data.get("num_date", None)): # it's ok not to have temporal information
-            node["node_attrs"]["num_date"] = {"value": raw_data["num_date"]}
-            if is_valid(raw_data.get("num_date_confidence", None)):
-                node["node_attrs"]["num_date"]["confidence"] = raw_data["num_date_confidence"]
+            node["node_attrs"]["num_date"] = {"value": format_number(raw_data["num_date"])}
+            node["node_attrs"]["num_date"].update(attr_confidence(node["name"], raw_data, "num_date"))
 
     def _transfer_url_accession(node, raw_data):
         for prop in ["url", "accession"]:
@@ -765,12 +890,10 @@ def set_node_attrs_on_tree(data_json, node_attrs):
         exclude_list = ["gt", "num_date", "author"] # exclude special cases already taken care of
         trait_keys = trait_keys.difference(exclude_list)
         for key in trait_keys:
-            if is_valid(raw_data.get(key, None)):
-                node["node_attrs"][key] = {"value": raw_data[key]}
-                if is_valid(raw_data.get(key+"_confidence", None)):
-                    node["node_attrs"][key]["confidence"] = raw_data[key+"_confidence"]
-                if is_valid(raw_data.get(key+"_entropy", None)):
-                    node["node_attrs"][key]["entropy"] = raw_data[key+"_entropy"]
+            value = raw_data.get(key, None)
+            if is_valid(value):
+                node["node_attrs"][key] = {"value": format_number(value) if is_numeric(value) else value}
+                node["node_attrs"][key].update(attr_confidence(node["name"], raw_data, key))
 
     def _transfer_author_data(node):
         if node["name"] in author_data:
@@ -779,8 +902,10 @@ def set_node_attrs_on_tree(data_json, node_attrs):
     def _recursively_set_data(node):
         # get all the available information for this particular node
         raw_data = node_attrs[node["name"]]
+        # transfer requested metadata columns first so that the "special cases"
+        # below can overwrite them as necessary
+        _transfer_additional_metadata_columns(node, raw_data)
         # transfer "special cases"
-        _transfer_mutations(node, raw_data)
         _transfer_vaccine_info(node, raw_data)
         _transfer_labels(node, raw_data)
         _transfer_branch_lengths(node, raw_data) # add branch length as label
@@ -800,13 +925,12 @@ def node_data_prop_is_normal_trait(name):
     # those traits / keys / attrs which are not "special" and can be exported
     # as normal attributes on nodes
     excluded = [
-        "clade_annotation", # Clade annotation is label, not colorby!
-        "clade_membership", # will be auto-detected if it is available
         "authors",          # authors are set as a node property, not a trait property
         "author",           # see above
         "vaccine",          # vaccine info is stored as a "special" node prop
+        'clade_membership', # explicitly set as a coloring if present
         'branch_length',
-        'num_date',
+        'num_date',         # explicitly set as a coloring if present
         'raw_date',
         'numdate',
         'clock_length',
@@ -836,8 +960,7 @@ def register_parser(parent_subparsers):
         title="REQUIRED"
     )
     required.add_argument('--tree','-t', metavar="newick", required=True, help="Phylogenetic tree, usually output from `augur refine`")
-    required.add_argument('--node-data', metavar="JSON", required=True, nargs='+', action=ExtendAction, help="JSON files containing metadata for nodes in the tree")
-    required.add_argument('--output', metavar="JSON", required=True, help="Ouput file (typically for visualisation in auspice)")
+    required.add_argument('--output', metavar="JSON", required=True, help="Output file (typically for visualisation in auspice)")
 
     config = parser.add_argument_group(
         title="DISPLAY CONFIGURATION",
@@ -847,26 +970,66 @@ def register_parser(parent_subparsers):
     )
     config.add_argument('--auspice-config', metavar="JSON", help="Auspice configuration file")
     config.add_argument('--title', type=str, metavar="title", help="Title to be displayed by auspice")
-    config.add_argument('--maintainers', metavar="name", action="append", nargs='+', help="Analysis maintained by, in format 'Name <URL>' 'Name2 <URL>', ...")
+    config.add_argument('--maintainers', metavar="name", action=ExtendOverwriteDefault, nargs='+', help="Analysis maintained by, in format 'Name <URL>' 'Name2 <URL>', ...")
     config.add_argument('--build-url', type=str, metavar="url", help="Build URL/repository to be displayed by Auspice")
     config.add_argument('--description', metavar="description.md", help="Markdown file with description of build and/or acknowledgements to be displayed by Auspice")
-    config.add_argument('--geo-resolutions', metavar="trait", nargs='+', help="Geographic traits to be displayed on map")
-    config.add_argument('--color-by-metadata', metavar="trait", nargs='+', help="Metadata columns to include as coloring options")
-    config.add_argument('--panels', metavar="panels", nargs='+', choices=['tree', 'map', 'entropy', 'frequencies', 'measurements'], help="Restrict panel display in auspice. Options are %(choices)s. Ignore this option to display all available panels.")
+    config.add_argument('--warning', metavar="text or file", help="Text or file in Markdown format to be displayed as a warning banner by Auspice")
+    config.add_argument('--geo-resolutions', metavar="trait", nargs='+', action=ExtendOverwriteDefault, help="Geographic traits to be displayed on map")
+    config.add_argument('--color-by-metadata', metavar="trait", nargs='+', action=ExtendOverwriteDefault,
+        help="Metadata columns to include as coloring options. " +
+             f"Ignores columns named {INVALID_METADATA_COLUMNS!r}, so please rename them if you would like to include them as colorings.")
+    config.add_argument('--metadata-columns', nargs="+", action=ExtendOverwriteDefault,
+        help="Metadata columns to export in addition to columns provided by --color-by-metadata or colorings in the Auspice configuration file. " +
+             "These columns will not be used as coloring options in Auspice but will be visible in the tree. " +
+             f"Ignores columns named {INVALID_METADATA_COLUMNS!r}, so please rename them if you would like to include them as metadata fields.")
+    config.add_argument('--panels', metavar="panels", nargs='+', action=ExtendOverwriteDefault, choices=['tree', 'map', 'entropy', 'frequencies', 'measurements'], help="Restrict panel display in auspice. Options are %(choices)s. Ignore this option to display all available panels.")
 
     optional_inputs = parser.add_argument_group(
         title="OPTIONAL INPUT FILES"
     )
-    optional_inputs.add_argument('--metadata', metavar="FILE", help="Additional metadata for strains in the tree, as CSV or TSV")
+    optional_inputs.add_argument('--node-data', metavar="JSON", nargs='+', action=ExtendOverwriteDefault, help="JSON files containing metadata for nodes in the tree")
+    optional_inputs.add_argument('--metadata', metavar="FILE", help="Additional metadata for strains in the tree")
+    optional_inputs.add_argument('--metadata-delimiters', default=DEFAULT_DELIMITERS, nargs="+", action=ExtendOverwriteDefault,
+                                 help="delimiters to accept when reading a metadata file. Only one delimiter will be inferred.")
+    optional_inputs.add_argument('--metadata-id-columns', default=DEFAULT_ID_COLUMNS, nargs="+", action=ExtendOverwriteDefault,
+                                 help="names of possible metadata columns containing identifier information, ordered by priority. Only one ID column will be inferred.")
     optional_inputs.add_argument('--colors', metavar="FILE", help="Custom color definitions, one per line in the format `TRAIT_TYPE\\tTRAIT_VALUE\\tHEX_CODE`")
-    optional_inputs.add_argument('--lat-longs', metavar="TSV", help="Latitudes and longitudes for geography traits (overrides built in mappings)")
+    optional_inputs.add_argument('--lat-longs', metavar="TSV",
+        help=f"""Latitudes and longitudes for geography traits. See this file for the format:
+                 <https://github.com/nextstrain/augur/blob/{__version__}/augur/data/lat_longs.tsv>.
+                 This file provides the default set of latitudes and longitudes. An additional file
+                 specified by this option will extend the default set. Duplicates based on the first
+                 two columns will be resolved by taking the coordinates from the user-provided
+                 file.""")
+
+    minify_group = parser.add_argument_group(
+            title="OPTIONAL MINIFY SETTINGS",
+            description=f"""
+                By default, output JSON files (both main and sidecar) are automatically minimized if
+                the size of the un-minified main JSON file exceeds {MINIFY_THRESHOLD_MB} MB. Use
+                these options to override that behavior.
+                """
+        ).add_mutually_exclusive_group()
+    minify_group.add_argument('--minify-json', action="store_true", help="always export JSONs without indentation or line returns.")
+    minify_group.add_argument('--no-minify-json', action="store_true", help="always export JSONs to be human readable.")
+
+    root_sequence_group = parser.add_argument_group(
+            title="OPTIONAL ROOT-SEQUENCE SETTINGS",
+            description=f"""
+                The root-sequences describe the sequences (nuc + aa) for the parent of the tree's root-node. They may represent a
+                reference sequence or the inferred sequence at the root node, depending on how they were generated.
+                The data is taken directly from the `reference` key within the provided node-data JSONs.
+                These arguments are mutually exclusive.
+                """
+        ).add_mutually_exclusive_group()
+    root_sequence = root_sequence_group.add_mutually_exclusive_group()
+    root_sequence.add_argument('--include-root-sequence', action="store_true", help="Export as an additional JSON. The filename will follow the pattern of <OUTPUT>_root-sequence.json for a main auspice JSON of <OUTPUT>.json")
+    root_sequence.add_argument('--include-root-sequence-inline', action="store_true", help="Export the root sequence within the dataset JSON. This should only be used for small genomes for file size reasons.")
 
     optional_settings = parser.add_argument_group(
-        title="OPTIONAL SETTINGS"
+        title="OTHER OPTIONAL SETTINGS"
     )
-    optional_settings.add_argument('--minify-json', action="store_true", help="export JSONs without indentation or line returns")
-    optional_settings.add_argument('--include-root-sequence', action="store_true", help="Export an additional JSON containing the root sequence (reference sequence for vcf) used to identify mutations. The filename will follow the pattern of <OUTPUT>_root-sequence.json for a main auspice JSON of <OUTPUT>.json")
-    optional_settings.add_argument('--skip-validation', action="store_true", help="skip validation of input/output files. Use at your own risk!")
+    add_validation_arguments(optional_settings)
 
     return parser
 
@@ -900,20 +1063,17 @@ def set_display_defaults(data_json, config):
 
 def set_maintainers(data_json, config, cmd_line_maintainers):
     # Command-line args overwrite the config file
-    # Command-line info could come in as multiple lists w/multiple values, ex:
-    #       [['Name1 <url1>'], ['Name2 <url2>', 'Name3 <url3>'], ['Name4 <url4>']]
     # They may or may not all have URLs
     if cmd_line_maintainers:
         maintainers = []
-        for arg_entry in cmd_line_maintainers:
-            for maint in arg_entry:
-                res = re.search('<(.*)>', maint)
-                url = res.group(1) if res else ''
-                name = maint.split("<")[0].strip()
-                tmp_dict = {'name': name}
-                if url:
-                    tmp_dict['url'] = url
-                maintainers.append(tmp_dict)
+        for maint in cmd_line_maintainers:
+            res = re.search('<(.*)>', maint)
+            url = res.group(1) if res else ''
+            name = maint.split("<")[0].strip()
+            tmp_dict = {'name': name}
+            if url:
+                tmp_dict['url'] = url
+            maintainers.append(tmp_dict)
         data_json['meta']['maintainers'] = maintainers
     elif config.get("maintainer"): # v1-type specification
         data_json['meta']["maintainers"] = [{ "name": config["maintainer"][0], "url": config["maintainer"][1]}]
@@ -943,11 +1103,62 @@ def set_description(data_json, cmd_line_description_file):
     `meta.description` in *data_json* to the text provided.
     """
     try:
-        with open(cmd_line_description_file, encoding='utf-8') as description_file:
+        with open_file(cmd_line_description_file) as description_file:
             markdown_text = description_file.read()
-            data_json['meta']['description'] = markdown_text
+        data_json['meta']['description'] = markdown_text
     except FileNotFoundError:
         fatal("Provided desciption file {} does not exist".format(cmd_line_description_file))
+
+def set_warning(data_json, text_or_file):
+    """
+    Read warning provided by *text_or_file* and set
+    `meta.warning` in *data_json* to the text provided.
+    """
+    if os.path.exists(text_or_file):
+        with open_file(text_or_file) as description_file:
+            markdown_text = description_file.read()
+        data_json['meta']['warning'] = markdown_text
+    else:
+        data_json['meta']['warning'] = text_or_file
+
+def create_branch_mutations(branch_attrs, node_data):
+    for node_name, node_info in node_data['nodes'].items():
+        if node_name not in branch_attrs:
+            continue # strain name not in the tree
+        if "aa_muts" not in node_info and "muts" not in node_info:
+            continue
+        branch_attrs[node_name]['mutations'] = {}
+        if "muts" in node_info and len(node_info["muts"]):
+            branch_attrs[node_name]["mutations"]["nuc"] = node_info["muts"]
+        if "aa_muts" in node_info:
+            aa = {gene:data for gene, data in node_info["aa_muts"].items() if len(data)}
+            branch_attrs[node_name]["mutations"].update(aa)
+
+def create_branch_labels(branch_attrs, node_data, branch_data):
+    ## start by creating the 'aa' branch label, summarising any amino acid mutations.
+    ## (We have already set mutations on 'branch_attrs' if they exist, just not the label)
+    ## This is done first so that if the user defines their own 'aa' labels they will
+    ## overwrite the ones created here
+    for branch_info in branch_attrs.values():
+        genes = [gene for gene in branch_info.get('mutations', {}) if gene!='nuc']
+        if len(genes):
+            branch_info['labels']['aa'] = \
+                '; '.join(f"{gene}: {', '.join(branch_info['mutations'][gene])}" for gene in genes)
+
+    ## check for the special key 'clade_annotation' defined via node data.
+    ## For historical reasons, this is interpreted as a branch label 'clade'
+    for node_name, node_info in node_data.items():
+        if node_name in branch_attrs and "clade_annotation" in node_info and is_valid(node_info["clade_annotation"]):
+            branch_attrs[node_name]['labels']['clade'] = node_info["clade_annotation"]
+
+    ## finally transfer any labels defined via <NODE DATA JSON> -> 'branches' -> labels
+    for node_name, branch_info in branch_data.items():
+        if node_name not in branch_attrs:
+            continue
+        for label_key, label_value in branch_info.get('labels', {}).items():
+            if label_key.upper() == "NONE" or not is_valid(label_value):
+                continue
+            branch_attrs[node_name]["labels"][label_key] = label_value
 
 def parse_node_data_and_metadata(T, node_data, metadata):
     node_data_names = set()
@@ -957,34 +1168,44 @@ def parse_node_data_and_metadata(T, node_data, metadata):
     node_attrs = {clade.name: {} for clade in T.root.find_clades()}
 
     # first pass: metadata
-    for node in metadata.values():
-        if node["strain"] in node_attrs: # i.e. this node name is in the tree
+    for metadata_id, node in metadata.items():
+        if metadata_id in node_attrs: # i.e. this node name is in the tree
             for key, value in node.items():
                 corrected_key = update_deprecated_names(key)
-                node_attrs[node["strain"]][corrected_key] = value
+                node_attrs[metadata_id][corrected_key] = value
                 metadata_names.add(corrected_key)
 
     # second pass: node data JSONs (overwrites keys of same name found in metadata)
+    node_attrs_which_are_actually_branch_attrs = ["clade_annotation", "aa_muts", "muts"]
     for name, info in node_data['nodes'].items():
         if name in node_attrs: # i.e. this node name is in the tree
             for key, value in info.items():
+                if key in node_attrs_which_are_actually_branch_attrs:
+                    continue # these will be handled below
                 corrected_key = update_deprecated_names(key)
                 node_attrs[name][corrected_key] = value
                 node_data_names.add(corrected_key)
 
-    return (node_data, node_attrs, node_data_names, metadata_names)
+    # third pass: create `branch_attrs`. The data comes from
+    # (a) some keys within `node_data['nodes']` (for legacy reasons)
+    # (b) the `node_data['branches']` dictionary, which currently only defines labels
+    branch_attrs = {clade.name: defaultdict(dict) for clade in T.root.find_clades()}
+    create_branch_mutations(branch_attrs, node_data)
+    create_branch_labels(branch_attrs, node_data['nodes'], node_data.get('branches', {}))
+
+    return (node_data, node_attrs, node_data_names, metadata_names, branch_attrs)
 
 def get_config(args):
     if not args.auspice_config:
         return {}
     config = read_config(args.auspice_config)
-    if not args.skip_validation:
+    if args.validation_mode is not ValidationMode.SKIP:
         try:
             print("Validating config file {} against the JSON schema".format(args.auspice_config))
             validate_auspice_config_v2(args.auspice_config)
         except ValidateError:
             print("Validation of {} failed. Please check the formatting of this file & refer to the augur documentation for further help. ".format(args.auspice_config))
-            sys.exit(2)
+            validation_failure(args.validation_mode)
     # Print a warning about the inclusion of "vaccine_choices" which are _unused_ by `export v2`
     # (They are in the schema as this allows v1-compat configs to be used)
     if config.get("vaccine_choices"):
@@ -992,26 +1213,64 @@ def get_config(args):
         del config["vaccine_choices"]
     return config
 
+
+def get_additional_metadata_columns(config, command_line_metadata_columns, metadata_names):
+    # Command line args override what is set in the config file
+    if command_line_metadata_columns:
+        potential_metadata_columns = command_line_metadata_columns
+    else:
+        potential_metadata_columns = config.get("metadata_columns", [])
+
+    additional_metadata_columns = []
+    for col in potential_metadata_columns:
+        if col in INVALID_METADATA_COLUMNS:
+            warn(f"You asked for a metadata field {col!r}, but this is an invalid field.\n"
+                  "It will be ignored during export, please rename field if you would like to include as a metadata field.")
+            continue
+        # Match the column names corrected within parse_node_data_and_metadata
+        corrected_col = update_deprecated_names(col)
+        if corrected_col not in metadata_names:
+            warn(f"Requested metadata column {col!r} does not exist and will not be exported")
+            continue
+        additional_metadata_columns.append(corrected_col)
+
+    return additional_metadata_columns
+
+
 def run(args):
     configure_warnings()
     data_json = {"version": "v2", "meta": {"updated": time.strftime('%Y-%m-%d')}}
 
     #load input files
-    try:
-        node_data_file = read_node_data(args.node_data, skip_validation=args.skip_validation) # node_data_files is an array of multiple files (or a single file)
-    except FileNotFoundError:
-        print(f"ERROR: node data file ({args.node_data}) does not exist")
-        sys.exit(2)
+    if args.node_data is not None:
+      try:
+          node_data_file = read_node_data(args.node_data, validation_mode=args.validation_mode) # node_data_files is an array of multiple files (or a single file)
+      except FileNotFoundError:
+          print(f"ERROR: node data file ({args.node_data}) does not exist")
+          sys.exit(2)
+    else:
+        node_data_file = {'nodes': {}}
 
     if args.metadata is not None:
         try:
-            metadata_file = read_metadata(args.metadata).to_dict(orient="index")
-            for strain in metadata_file.keys():
-                if "strain" not in metadata_file[strain]:
-                    metadata_file[strain]["strain"] = strain
+            metadata_df = read_metadata(
+                args.metadata,
+                delimiters=args.metadata_delimiters,
+                id_columns=args.metadata_id_columns)
+
+            # Add the index as a column.
+            metadata_df[metadata_df.index.name] = metadata_df.index
+
+            metadata_file = metadata_df.to_dict(orient="index")
         except FileNotFoundError:
             print(f"ERROR: meta data file ({args.metadata}) does not exist", file=sys.stderr)
             sys.exit(2)
+        except InvalidDelimiter:
+            raise AugurError(
+                f"Could not determine the delimiter of {args.metadata!r}. "
+                f"Valid delimiters are: {args.metadata_delimiters!r}. "
+                "This can be changed with --metadata-delimiters."
+            )
         except Exception as error:
             print(f"ERROR: {error}", file=sys.stderr)
             sys.exit(1)
@@ -1020,8 +1279,10 @@ def run(args):
 
     # parse input files
     T = Phylo.read(args.tree, 'newick')
-    node_data, node_attrs, node_data_names, metadata_names = parse_node_data_and_metadata(T, node_data_file, metadata_file)
+    node_data, node_attrs, node_data_names, metadata_names, branch_attrs = \
+            parse_node_data_and_metadata(T, node_data_file, metadata_file)
     config = get_config(args)
+    additional_metadata_columns = get_additional_metadata_columns(config, args.metadata_columns, metadata_names)
 
     # set metadata data structures
     set_title(data_json, config, args.title)
@@ -1031,6 +1292,8 @@ def run(args):
     set_annotations(data_json, node_data)
     if args.description:
         set_description(data_json, args.description)
+    if args.warning:
+        set_warning(data_json, args.warning)
 
     try:
         set_colorings(
@@ -1040,7 +1303,8 @@ def run(args):
             metadata_names=metadata_names,
             node_data_colorings=node_data_names,
             provided_colors=read_colors(args.colors),
-            node_attrs=node_attrs
+            node_attrs=node_attrs,
+            branch_attrs=branch_attrs
         )
     except FileNotFoundError as e:
         print(f"ERROR: required file could not be read: {e}")
@@ -1048,8 +1312,10 @@ def run(args):
     set_filters(data_json, config)
 
     # set tree structure
-    data_json["tree"] = convert_tree_to_json_structure(T.root, node_attrs)
-    set_node_attrs_on_tree(data_json, node_attrs)
+    data_json["tree"] = convert_tree_to_json_structure(T.root, node_attrs, node_div(T, node_attrs))
+    set_node_attrs_on_tree(data_json, node_attrs, additional_metadata_columns)
+    set_branch_attrs_on_tree(data_json, branch_attrs)
+
     set_geo_resolutions(data_json, config, args.geo_resolutions, read_lat_longs(args.lat_longs), node_attrs)
     set_panels(data_json, config, args.panels)
     set_data_provenance(data_json, config)
@@ -1058,25 +1324,40 @@ def run(args):
     if config.get("extensions"):
         data_json["meta"]["extensions"] = config["extensions"]
 
-    # Write outputs - the (unified) dataset JSON intended for auspice & perhaps the ref root-sequence JSON
-    indent = {"indent": None} if args.minify_json else {}
-    write_json(data=orderKeys(data_json), file_name=args.output, include_version=False, **indent)
+    # Should output be minified?
+    # User-specified arguments take precedence before determining behavior based
+    # on the size of the tree.
+    if args.minify_json or os.environ.get("AUGUR_MINIFY_JSON"):
+        minify = True
+    elif args.no_minify_json:
+        minify = False
+    else:
+        if json_size(data_json) > MINIFY_THRESHOLD_MB * 10**6:
+            minify = True
+        else:
+            minify = False
 
-    if args.include_root_sequence:
+    # Write outputs - the (unified) dataset JSON intended for auspice & perhaps the ref root-sequence JSON
+    indent = {"indent": None} if minify else {}
+    if args.include_root_sequence or args.include_root_sequence_inline:
+        # Note - argparse enforces that only one of these args will be true
         if 'reference' in node_data:
-            # Save the root sequence with the same stem from the main auspice
-            # output filename.  For example, if the main auspice output is
-            # "auspice/zika.json", the root sequence will be
-            # "auspice/zika_root-sequence.json".
-            output_path = Path(args.output)
-            root_sequence_path = output_path.parent / Path(output_path.stem + "_root-sequence" + output_path.suffix)
-            write_json(data=node_data['reference'], file_name=root_sequence_path, include_version=False, **indent)
+            if args.include_root_sequence_inline:
+                data_json['root_sequence'] = node_data['reference']
+            elif args.include_root_sequence:
+                # Save the root sequence with the same stem from the main auspice
+                # output filename.  For example, if the main auspice output is
+                # "auspice/zika.json", the root sequence will be
+                # "auspice/zika_root-sequence.json".
+                output_path = Path(args.output)
+                root_sequence_path = output_path.parent / Path(output_path.stem + "_root-sequence" + output_path.suffix)
+                write_json(data=node_data['reference'], file=root_sequence_path, include_version=False, **indent)
         else:
             fatal("Root sequence output was requested, but the node data provided is missing a 'reference' key.")
+    write_json(data=orderKeys(data_json), file=args.output, include_version=False, **indent)
 
     # validate outputs
-    if not args.skip_validation:
-        validate_data_json(args.output)
+    validate_data_json(args.output, args.validation_mode)
 
     if deprecationWarningsEmitted:
         print("\n------------------------")

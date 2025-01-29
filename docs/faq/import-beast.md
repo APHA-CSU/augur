@@ -20,7 +20,7 @@ Pay particular attention to the color-variable types, which can either be "conti
 4. Extra metadata can be included here -- either as an additional node-data JSON file, or in TSV format.
 Any additional metadata must be both specified in the `auspice-config.json` file and provided to `augur export`.
 
-5. Export auspice-compatable JSONs using `augur export`.
+5. Export auspice-compatible JSONs using `augur export`.
 A basic example of what options to supply to this command is provided as terminal output from step (1).
 
 
@@ -66,4 +66,8 @@ augur import beast --mcc data/beast.mcc.nex --output-tree results/mers.new
     --most-recent-tip-date 2018.43
 ```
 
-A full [example build can be found here](https://github.com/nextstrain/augur/tree/master/tests/builds/beast_mers).
+A full [example build can be found here][]. (N.b., this build has been
+removed from the current version of the repository; the link here is
+to the last version prior to its removal.)
+
+[example build can be found here]: https://github.com/nextstrain/augur/blob/73b8a71103bae3a36b49acdee7c7c75a7e69a751/tests/builds/beast_mers/Snakefile

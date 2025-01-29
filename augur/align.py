@@ -6,6 +6,8 @@ import os
 from shutil import copyfile
 import numpy as np
 from Bio import AlignIO, SeqIO, Seq, Align
+from .argparse_ import ExtendOverwriteDefault
+from .io.file import open_file
 from .io.shell_command_runner import run_shell_command
 from .io.vcf import shquote
 from .utils import nthreads_value
@@ -23,7 +25,7 @@ def register_arguments(parser):
     Kept as a separate function than `register_parser` to continue to support
     unit tests that use this function to create argparser.
     """
-    parser.add_argument('--sequences', '-s', required=True, nargs="+", metavar="FASTA", help="sequences to align")
+    parser.add_argument('--sequences', '-s', required=True, nargs="+", action=ExtendOverwriteDefault, metavar="FASTA", help="sequences to align")
     parser.add_argument('--output', '-o', default="alignment.fasta", help="output file (default: %(default)s)")
     parser.add_argument('--nthreads', type=nthreads_value, default=1,
                                 help="number of threads to use; specifying the value 'auto' will cause the number of available CPU cores on your system, if determinable, to be used")
@@ -54,7 +56,7 @@ def prepare(sequences, existing_aln_fname, output, ref_name, ref_seq_fname):
 
     Parameters
     ----------
-    sequences : list[str]
+    sequences : list of str
         List of paths to FASTA-formatted sequences to align.
     existing_aln_fname : str
         Path of an existing alignment to use, or None
@@ -67,7 +69,8 @@ def prepare(sequences, existing_aln_fname, output, ref_name, ref_seq_fname):
 
     Returns
     -------
-        tuple: The existing alignment filename, the new sequences filename, and the name of the reference sequence.
+    tuple of str
+        The existing alignment filename, the new sequences filename, and the name of the reference sequence.
     """
     seqs = read_sequences(*sequences)
     seqs_to_align_fname = output + ".to_align.fasta"
@@ -104,7 +107,7 @@ def run(args):
     '''
     Parameters
     ----------
-    args : namespace
+    args : argparse.Namespace
         arguments passed in via the command-line from augur
 
     Returns
@@ -152,6 +155,8 @@ def run(args):
 def postprocess(output_file, ref_name, keep_reference, fill_gaps):
     """Postprocessing of the combined alignment file.
 
+    The modified alignment is written directly to output_file.
+
     Parameters
     ----------
     output_file: str
@@ -162,10 +167,6 @@ def postprocess(output_file, ref_name, keep_reference, fill_gaps):
         If the reference was provided, whether it should be kept in the alignment
     fill_gaps: bool
         Replace all gaps in the alignment with "N" to indicate ambiguous sites.
-
-    Returns
-    -------
-        None - the modified alignment is written directly to output_file
     """
     # -- ref_name --
     # reads the new alignment
@@ -270,7 +271,7 @@ def strip_non_reference(aln, reference, insertion_csv=None):
 
     Parameters
     ----------
-    aln : MultipleSeqAlign
+    aln : Bio.Align.MultipleSeqAlignment
         Biopython Alignment
     reference : str
         name of reference sequence, assumed to be part of the alignment
@@ -280,9 +281,8 @@ def strip_non_reference(aln, reference, insertion_csv=None):
     list
         list of trimmed sequences, effectively a multiple alignment
 
-
-    Tests
-    -----
+    Examples
+    --------
     >>> [s.name for s in strip_non_reference(read_alignment("tests/data/align/test_aligned_sequences.fasta"), "with_gaps")]
     Trimmed gaps in with_gaps from the alignment
     ['with_gaps', 'no_gaps', 'some_other_seq', '_R_crick_strand']
@@ -371,7 +371,7 @@ def analyse_insertions(aln, ungapped, insertion_csv):
         for insertion_seq, strains in i_data.items():
             for strain in strains:
                 strain_data[strain][idx] = insertion_seq
-    with open(insertion_csv, 'w', encoding='utf-8') as fh:
+    with open_file(insertion_csv, 'w') as fh:
         print(",".join(header), file=fh)
         for strain in strain_data:
             print("{},{}".format(strain, ",".join(strain_data[strain])), file=fh)
@@ -384,7 +384,7 @@ def prettify_alignment(aln):
 
     Parameters
     ----------
-    aln : MultipleSeqAlign
+    aln : Bio.Align.MultipleSeqAlignment
         Biopython Alignment
     '''
     for seq in aln:
@@ -407,7 +407,7 @@ def make_gaps_ambiguous(aln):
 
     Parameters
     ----------
-    aln : MultipleSeqAlign
+    aln : Bio.Align.MultipleSeqAlignment
         Biopython Alignment
     '''
     for seq in aln:

@@ -4,17 +4,19 @@ Refine an initial tree using sequence metadata.
 import numpy as np
 import sys
 from Bio import Phylo
+from .argparse_ import ExtendOverwriteDefault
 from .dates import get_numerical_dates
-from .io.metadata import read_metadata
+from .dates.errors import InvalidYearBounds
+from .io.metadata import DEFAULT_DELIMITERS, DEFAULT_ID_COLUMNS, METADATA_DATE_COLUMN, InvalidDelimiter, Metadata, read_metadata
 from .utils import read_tree, write_json, InvalidTreeError
 from .errors import AugurError
 from treetime.vcf_utils import read_vcf
 from treetime.seq_utils import profile_maps
 
 def refine(tree=None, aln=None, ref=None, dates=None, branch_length_inference='auto',
-             confidence=False, resolve_polytomies=True, max_iter=2, precision='auto',
+             confidence=False, resolve_polytomies=True, stochastic_resolve=False, max_iter=2, precision='auto',
              infer_gtr=True, Tc=0.01, reroot=None, use_marginal='always', fixed_pi=None, use_fft=True,
-             clock_rate=None, clock_std=None, clock_filter_iqd=None, verbosity=1, covariance=True, **kwarks):
+             clock_rate=None, clock_std=None, clock_filter_iqd=None, verbosity=1, covariance=True, rng_seed=None, **kwarks):
     from treetime import TreeTime
 
     try: #Tc could be a number or  'opt' or 'skyline'. TreeTime expects a float or int if a number.
@@ -37,7 +39,7 @@ def refine(tree=None, aln=None, ref=None, dates=None, branch_length_inference='a
 
     #send ref, if is None, does no harm
     tt = TreeTime(tree=tree, aln=aln, ref=ref, dates=dates, use_fft=use_fft,
-                  verbose=verbosity, gtr='JC69', precision=precision)
+                  verbose=verbosity, gtr='JC69', precision=precision, rng_seed=rng_seed)
 
     # conditionally run clock-filter and remove bad tips
     if clock_filter_iqd:
@@ -69,8 +71,9 @@ def refine(tree=None, aln=None, ref=None, dates=None, branch_length_inference='a
 
     tt.run(infer_gtr=infer_gtr, root=reroot, Tc=Tc, time_marginal=marginal,
            branch_length_mode=branch_length_inference, resolve_polytomies=resolve_polytomies,
-           max_iter=max_iter, fixed_pi=fixed_pi, fixed_clock_rate=clock_rate,
-           vary_rate=vary_rate, use_covariation=covariance, raise_uncaught_exceptions=True, **kwarks)
+           stochastic_resolve=stochastic_resolve, max_iter=max_iter, fixed_pi=fixed_pi,
+           fixed_clock_rate=clock_rate, vary_rate=vary_rate, use_covariation=covariance,
+           raise_uncaught_exceptions=True, **kwarks)
 
     if confidence:
         for n in tt.tree.find_clades():
@@ -97,16 +100,21 @@ def register_parser(parent_subparsers):
     parser = parent_subparsers.add_parser("refine", help=__doc__)
     parser.add_argument('--alignment', '-a', help="alignment in fasta or VCF format")
     parser.add_argument('--tree', '-t', required=True, help="prebuilt Newick")
-    parser.add_argument('--metadata', type=str, metavar="FILE", help="sequence metadata, as CSV or TSV")
+    parser.add_argument('--metadata', type=str, metavar="FILE", help="sequence metadata")
+    parser.add_argument('--metadata-delimiters', default=DEFAULT_DELIMITERS, nargs="+", action=ExtendOverwriteDefault,
+                        help="delimiters to accept when reading a metadata file. Only one delimiter will be inferred.")
+    parser.add_argument('--metadata-id-columns', default=DEFAULT_ID_COLUMNS, nargs="+", action=ExtendOverwriteDefault,
+                        help="names of possible metadata columns containing identifier information, ordered by priority. Only one ID column will be inferred.")
     parser.add_argument('--output-tree', type=str, help='file name to write tree to')
     parser.add_argument('--output-node-data', type=str, help='file name to write branch lengths as node data')
     parser.add_argument('--use-fft', action="store_true", help="produce timetree using FFT for convolutions")
+    parser.add_argument('--max-iter', default=2, type=int, help="maximal number of iterations TreeTime uses for timetree inference")
     parser.add_argument('--timetree', action="store_true", help="produce timetree using treetime, requires tree where branch length is in units of average number of nucleotide or protein substitutions per site (and branch lengths do not exceed 4)")
     parser.add_argument('--coalescent', help="coalescent time scale in units of inverse clock rate (float), optimize as scalar ('opt'), or skyline ('skyline')")
     parser.add_argument('--gen-per-year', default=50, type=float, help="number of generations per year, relevant for skyline output('skyline')")
     parser.add_argument('--clock-rate', type=float, help="fixed clock rate")
     parser.add_argument('--clock-std-dev', type=float, help="standard deviation of the fixed clock_rate estimate")
-    parser.add_argument('--root', nargs="+", default='best', help="rooting mechanism ('best', least-squares', 'min_dev', 'oldest') "
+    parser.add_argument('--root', nargs="+", action=ExtendOverwriteDefault, default='best', help="rooting mechanism ('best', least-squares', 'min_dev', 'oldest', 'mid_point') "
                                 "OR node to root by OR two nodes indicating a monophyletic group to root by. "
                                 "Run treetime -h for definitions of rooting methods.")
     parser.add_argument('--keep-root', action="store_true", help="do not reroot the tree; use it as-is. "
@@ -115,7 +123,12 @@ def register_parser(parent_subparsers):
                                 "rates and/or rerooting. "
                                 "Use --no-covariance to turn off.")
     parser.add_argument('--no-covariance', dest='covariance', action='store_false')  #If you set help here, it displays 'default: True' - which is confusing!
-    parser.add_argument('--keep-polytomies', action='store_true', help='Do not attempt to resolve polytomies')
+
+    resolve_group = parser.add_mutually_exclusive_group()
+    resolve_group.add_argument('--keep-polytomies', action='store_true', help='Do not attempt to resolve polytomies')
+    resolve_group.add_argument('--stochastic-resolve', action='store_true', help='Resolve polytomies via stochastic subtree building rather than greedy optimization')
+    resolve_group.add_argument('--greedy-resolve', action='store_false', dest='stochastic_resolve') # inverse of `--stochastic-resolve` to facilitate changing defaults in the future
+
     parser.add_argument('--precision', type=int, choices=[0,1,2,3], help="precision used by TreeTime to determine the number of grid points that are used for the evaluation of the branch length interpolation objects. Values range from 0 (rough) to 3 (ultra fine) and default to 'auto'.")
     parser.add_argument('--date-format', default="%Y-%m-%d", help="date format")
     parser.add_argument('--date-confidence', action="store_true", help="calculate confidence intervals for node dates")
@@ -126,7 +139,7 @@ def register_parser(parent_subparsers):
     parser.add_argument('--clock-filter-iqd', type=float, help='clock-filter: remove tips that deviate more than n_iqd '
                                 'interquartile ranges from the root-to-tip vs time regression')
     parser.add_argument('--vcf-reference', type=str, help='fasta file of the sequence the VCF was mapped to')
-    parser.add_argument('--year-bounds', type=int, nargs='+', help='specify min or max & min prediction bounds for samples with XX in year')
+    parser.add_argument('--year-bounds', type=int, nargs='+', action=ExtendOverwriteDefault, help='specify min or max & min prediction bounds for samples with XX in year')
     parser.add_argument('--divergence-units', type=str, choices=['mutations', 'mutations-per-site'],
                         default='mutations-per-site', help='Units in which sequence divergences is exported.')
     parser.add_argument('--seed', type=int, help='seed for random number generation')
@@ -136,8 +149,6 @@ def register_parser(parent_subparsers):
 
 
 def run(args):
-    if args.seed is not None:
-        np.random.seed(args.seed)
 
     # check alignment type, set flags, read in if VCF
     is_vcf = False
@@ -203,21 +214,44 @@ def run(args):
         if args.metadata is None:
             print("ERROR: meta data with dates is required for time tree reconstruction", file=sys.stderr)
             return 1
-        metadata = read_metadata(args.metadata)
-        if args.year_bounds:
-            args.year_bounds.sort()
-        dates = get_numerical_dates(metadata, fmt=args.date_format,
-                                    min_max_year=args.year_bounds)
+
+        try:
+            metadata_object = Metadata(args.metadata, args.metadata_delimiters, args.metadata_id_columns)
+        except InvalidDelimiter:
+            raise AugurError(
+                f"Could not determine the delimiter of {args.metadata!r}. "
+                f"Valid delimiters are: {args.metadata_delimiters!r}. "
+                "This can be changed with --metadata-delimiters."
+            )
+
+        metadata = read_metadata(
+            args.metadata,
+            delimiters=[metadata_object.delimiter],
+            columns=[metadata_object.id_column, METADATA_DATE_COLUMN],
+            id_columns=[metadata_object.id_column],
+            dtype="string",
+        )
+
+        try:
+            dates = get_numerical_dates(metadata, fmt=args.date_format,
+                                        min_max_year=args.year_bounds)
+        except InvalidYearBounds as error:
+            raise AugurError(f"Invalid value for --year-bounds: {error}")
 
         # save input state string for later export
         for n in T.get_terminals():
-            if n.name in metadata.index and 'date' in metadata.columns:
-                n.raw_date = metadata.at[n.name, 'date']
+            if n.name in metadata.index and METADATA_DATE_COLUMN in metadata.columns:
+                n.raw_date = metadata.at[n.name, METADATA_DATE_COLUMN]
 
         if args.date_confidence:
             time_inference_mode = 'always' if args.date_inference=='marginal' else 'only-final'
         else:
             time_inference_mode = 'always' if args.date_inference=='marginal' else 'never'
+
+        if args.root == 'mid_point':
+            # root at midpoint and disable downstream rerooting in TreeTime
+            T.root_at_midpoint()
+            args.root = None
 
         tt = refine(tree=T, aln=aln, ref=ref, dates=dates, confidence=args.date_confidence,
                     reroot=args.root, # or 'best', # We now have a default in param spec - this just adds confusion.
@@ -226,13 +260,19 @@ def run(args):
                     branch_length_inference = args.branch_length_inference or 'auto',
                     precision = 'auto' if args.precision is None else args.precision,
                     clock_rate=args.clock_rate, clock_std=args.clock_std_dev,
-                    clock_filter_iqd=args.clock_filter_iqd,
+                    clock_filter_iqd=args.clock_filter_iqd, max_iter=args.max_iter,
                     covariance=args.covariance, resolve_polytomies=(not args.keep_polytomies),
-                    verbosity=args.verbosity)
+                    stochastic_resolve=args.stochastic_resolve, verbosity=args.verbosity, rng_seed=args.seed)
 
         node_data['clock'] = {'rate': tt.date2dist.clock_rate,
                               'intercept': tt.date2dist.intercept,
                               'rtt_Tmrca': -tt.date2dist.intercept/tt.date2dist.clock_rate}
+        # Include the standard deviation of the clock rate, if the covariance
+        # matrix is available.
+        if hasattr(tt.date2dist, "cov") and tt.date2dist.cov is not None:
+            node_data["clock"]["cov"] = tt.date2dist.cov
+            node_data["clock"]["rate_std"] = np.sqrt(tt.date2dist.cov[0, 0])
+
         if args.coalescent=='skyline':
             try:
                 skyline, conf = tt.merger_model.skyline_inferred(gen=args.gen_per_year, confidence=2)
@@ -256,22 +296,27 @@ def run(args):
             if args.root == 'best':
                 print("Warning: To root without inferring a timetree, you must specify an explicit outgroup.")
                 print("\tProceeding without re-rooting. To suppress this message, use '--keep-root'.\n")
-            elif args.root in ['least-squares', 'min_dev', 'oldest']:
+            elif args.root in ['least-squares', 'oldest', 'min_dev']:
                 raise TypeError("The rooting option '%s' is only available when inferring a timetree. Please specify an explicit outgroup."%args.root)
+            elif args.root=="mid_point":
+                T.root_at_midpoint()
             else:
                 try:
                     T.root_with_outgroup(args.root)
                 except ValueError as err:
                     raise ValueError(f"HINT: This error may be because your specified root with name '{args.root}' was not found in your alignment file") from err
 
-        tt = TreeAnc(tree=T, aln=aln, ref=ref, gtr='JC69', verbose=args.verbosity)
+        tt = TreeAnc(tree=T, aln=aln, ref=ref, gtr='JC69', verbose=args.verbosity, rng_seed=args.seed)
 
     node_data['nodes'] = collect_node_data(T, attributes)
     if args.divergence_units=='mutations-per-site': #default
         pass
     elif args.divergence_units=='mutations':
         if not args.timetree:
-            tt.infer_ancestral_sequences()
+            # infer ancestral sequence for the purpose of counting mutations
+            # sample mutations from the root profile, otherwise use most likely state.
+            # Reconstruct tip states to avoid mutations to N or W etc be counted
+            tt.infer_ancestral_sequences(marginal=True, reconstruct_tip_states=True, sample_from_profile='root')
         nuc_map = profile_maps['nuc']
 
         def are_sequence_states_different(nuc1, nuc2):
@@ -302,7 +347,6 @@ def run(args):
         return 1
 
     # Export refined tree and node data
-    import json
     tree_success = Phylo.write(T, tree_fname, 'newick', format_branch_length='%1.8f', branch_length_only=True)
     print("updated tree written to",tree_fname, file=sys.stdout)
 

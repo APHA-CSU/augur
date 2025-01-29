@@ -1,8 +1,8 @@
 from collections import defaultdict
-from io import TextIOWrapper
 import functools
-from pkg_resources import resource_stream
 
+from augur.data import as_file
+from augur.io.file import open_file
 from augur.util_support.color_parser_line import ColorParserLine
 
 
@@ -17,12 +17,12 @@ class ColorParser:
         colors = {}
 
         if self.use_defaults:
-            with resource_stream("augur", "data/colors.tsv") as stream:
-                with TextIOWrapper(stream, "utf-8") as defaults:
+            with as_file("colors.tsv") as file:
+                with open_file(file) as defaults:
                     colors = {**colors, **self.parse_file(defaults)}
 
         if self.mapping_filename:
-            with open(self.mapping_filename, encoding="utf-8") as mapping:
+            with open_file(self.mapping_filename) as mapping:
                 colors = {**colors, **self.parse_file(mapping)}
 
         return colors

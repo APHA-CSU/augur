@@ -5,11 +5,9 @@ import os
 import sys
 from shutil import copyfile
 
-import numpy as np
-import pandas as pd
-from Bio import SeqIO
 from Bio.Seq import MutableSeq
 
+from .argparse_ import ExtendOverwriteDefault
 from .io.file import open_file
 from .io.sequences import read_sequences, write_sequences
 from .io.shell_command_runner import run_shell_command
@@ -35,7 +33,7 @@ def mask_vcf(mask_sites, in_file, out_file, cleanup=True):
 
     Parameters
     ----------
-    mask_sites: list[int]
+    mask_sites: list of int
         A list of site indexes to exclude from the vcf.
     in_file: str
         The path to the vcf file you wish to mask.
@@ -84,9 +82,9 @@ def mask_sequence(sequence, mask_sites, mask_from_beginning, mask_from_end, mask
 
     Parameters
     ----------
-    sequence : Bio.SeqIO.SeqRecord
+    sequence : Bio.SeqRecord.SeqRecord
         A sequence to be masked
-    mask_sites: list[int]
+    mask_sites: list of int
         A list of site indexes to exclude from the FASTA.
     mask_from_beginning: int
         Number of sites to mask from the beginning of each sequence (default 0)
@@ -97,7 +95,7 @@ def mask_sequence(sequence, mask_sites, mask_from_beginning, mask_from_end, mask
 
     Returns
     -------
-    Bio.SeqIO.SeqRecord
+    Bio.SeqRecord.SeqRecord
         Masked sequence in its original record object
 
     """
@@ -132,7 +130,7 @@ def mask_fasta(mask_sites, in_file, out_file, mask_from_beginning=0, mask_from_e
 
     Parameters
     ----------
-    mask_sites: list[int]
+    mask_sites: list of int
         A list of site indexes to exclude from the FASTA.
     in_file: str
         The path to the FASTA file you wish to mask.
@@ -179,7 +177,7 @@ def register_arguments(parser):
     parser.add_argument('--mask-from-beginning', type=int, default=0, help="FASTA Only: Number of sites to mask from beginning")
     parser.add_argument('--mask-from-end', type=int, default=0, help="FASTA Only: Number of sites to mask from end")
     parser.add_argument('--mask-invalid', action='store_true', help="FASTA Only: Mask invalid nucleotides")
-    parser.add_argument("--mask-sites", nargs='+', type = int,  help="1-indexed list of sites to mask")
+    parser.add_argument("--mask-sites", nargs='+', action=ExtendOverwriteDefault, type = int,  help="1-indexed list of sites to mask")
     parser.add_argument('--output', '-o', help="output file")
     parser.add_argument('--no-cleanup', dest="cleanup", action="store_false",
                         help="Leave intermediate files around. May be useful for debugging")

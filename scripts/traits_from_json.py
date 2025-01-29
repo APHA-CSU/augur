@@ -1,11 +1,13 @@
 from __future__ import print_function
-import os, sys
+import sys
 sys.path.append('..') # this is an assumption and is probably wrong
 from base.utils import parse_date
 import argparse
 import json
-from pdb import set_trace
 from numpy import ndarray
+
+from augur.argparse_ import ExtendOverwriteDefault
+
 
 def get_trait(attributes, trait, dateFormat):
     if trait in ["num_date", "date"]:
@@ -28,8 +30,8 @@ if __name__=="__main__":
     parser = argparse.ArgumentParser(description = "Process a given JSONs")
     parser.add_argument('--json', required=True, type=str, help="prepared JSON")
     parser.add_argument('--trait', required=True, type=str, help="prepared JSON")
-    parser.add_argument('--header', nargs='*', type=str, help="header fields")
-    parser.add_argument('--date_format', nargs='*', default=["%Y-%m-%d"], type=str, help="if needed. default: [%%Y-%%m-%%d]")
+    parser.add_argument('--header', nargs='*', action=ExtendOverwriteDefault, type=str, help="header fields")
+    parser.add_argument('--date_format', nargs='*', action=ExtendOverwriteDefault, default=["%Y-%m-%d"], type=str, help="if needed. default: [%%Y-%%m-%%d]")
     params = parser.parse_args()
 
     with open(params.json, 'r') as fh:

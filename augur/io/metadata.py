@@ -1,39 +1,63 @@
 import csv
 import os
+from typing import Iterable, Sequence
 import pandas as pd
 import pyfastx
+import python_calamine as calamine
 import sys
-from io import StringIO
-from itertools import chain
+from io import StringIO, TextIOWrapper
+from itertools import chain, zip_longest
+from textwrap import dedent
 
 from augur.errors import AugurError
 from augur.io.print import print_err
 from augur.types import DataErrorMethod
-from .file import open_file
+from .file import PANDAS_READ_CSV_OPTIONS, open_file
 
 
-def read_metadata(metadata_file, id_columns=("strain", "name"), chunk_size=None):
-    """Read metadata from a given filename and into a pandas `DataFrame` or
+DEFAULT_DELIMITERS = (',', '\t')
+
+DEFAULT_ID_COLUMNS = ("strain", "name")
+
+METADATA_DATE_COLUMN = 'date'
+
+
+class InvalidDelimiter(Exception):
+    pass
+
+
+def read_metadata(metadata_file, delimiters=DEFAULT_DELIMITERS, columns=None, id_columns=DEFAULT_ID_COLUMNS, chunk_size=None, dtype=None):
+    r"""Read metadata from a given filename and into a pandas `DataFrame` or
     `TextFileReader` object.
 
     Parameters
     ----------
     metadata_file : str
         Path to a metadata file to load.
-    id_columns : list[str]
+    delimiters : list of str
+        List of possible delimiters to check for between columns in the metadata.
+        Only one delimiter will be inferred.
+    columns : list of str
+        List of columns to read. If unspecified, read all columns.
+    id_columns : list of str
         List of possible id column names to check for, ordered by priority.
+        Only one id column will be inferred.
     chunk_size : int
         Size of chunks to stream from disk with an iterator instead of loading the entire input file into memory.
-
+    dtype : dict or str
+        Data types to apply to columns in metadata. If unspecified, pandas data type inference will be used.
+        See documentation for an argument of the same name to `pandas.read_csv()`.
     Returns
     -------
-    pandas.DataFrame or pandas.TextFileReader
+    pandas.DataFrame or `pandas.io.parsers.TextFileReader`
 
     Raises
     ------
-    KeyError :
+    KeyError
         When the metadata file does not have any valid index columns.
 
+    Examples
+    --------
 
     For standard use, request a metadata file and get a pandas DataFrame.
 
@@ -45,7 +69,7 @@ def read_metadata(metadata_file, id_columns=("strain", "name"), chunk_size=None)
     >>> read_metadata("tests/functional/filter/data/metadata.tsv", id_columns=("Virus name",))
     Traceback (most recent call last):
       ...
-    Exception: None of the possible id columns (('Virus name',)) were found in the metadata's columns ('strain', 'virus', 'accession', 'date', 'region', 'country', 'division', 'city', 'db', 'segment', 'authors', 'url', 'title', 'journal', 'paper_url')
+    Exception: None of the possible id columns ('Virus name') were found in the metadata's columns ('strain', 'virus', 'accession', 'date', 'region', 'country', 'division', 'city', 'db', 'segment', 'authors', 'url', 'title', 'journal', 'paper_url')
 
     We also allow iterating through metadata in fixed chunk sizes.
 
@@ -58,10 +82,11 @@ def read_metadata(metadata_file, id_columns=("strain", "name"), chunk_size=None)
 
     """
     kwargs = {
-        "sep": None,
-        "engine": "python",
+        "sep": _get_delimiter(metadata_file, delimiters),
+        "engine": "c",
         "skipinitialspace": True,
         "na_filter": False,
+        "low_memory": False,
     }
 
     if chunk_size:
@@ -72,6 +97,7 @@ def read_metadata(metadata_file, id_columns=("strain", "name"), chunk_size=None)
         metadata_file,
         iterator=True,
         **kwargs,
+        **PANDAS_READ_CSV_OPTIONS,
     )
     chunk = metadata.read(nrows=1)
     metadata.close()
@@ -84,34 +110,77 @@ def read_metadata(metadata_file, id_columns=("strain", "name"), chunk_size=None)
 
     # If we couldn't find a valid index column in the metadata, alert the user.
     if not id_columns_present:
-        raise Exception(f"None of the possible id columns ({id_columns!r}) were found in the metadata's columns {tuple(chunk.columns)!r}")
+        raise Exception(f"None of the possible id columns ({', '.join(map(repr, id_columns))}) were found in the metadata's columns ({', '.join(map(repr, chunk.columns))})")
     else:
         index_col = id_columns_present[0]
 
-    # If we found a valid column to index the DataFrame, specify that column and
-    # also tell pandas that the column should be treated like a string instead
-    # of having its type inferred. This latter argument allows users to provide
-    # numerical ids that don't get converted to numbers by pandas.
+    # If we found a valid column to index the DataFrame, specify that column.
     kwargs["index_col"] = index_col
-    kwargs["dtype"] = {index_col: "string"}
+
+    if columns is not None:
+        # Load a subset of the columns.
+        for requested_column in list(columns):
+            if requested_column not in chunk.columns:
+                # Ignore missing columns. Don't error since augur filter's
+                # --exclude-where allows invalid columns to be specified (they
+                # are just ignored).
+                print_err(f"WARNING: Column '{requested_column}' does not exist in the metadata file. This may cause subsequent errors.")
+                columns.remove(requested_column)
+                # NOTE: list()+remove() is not very efficient, but (1) it's easy
+                # to understand and (2) this is unlikely to be used with large
+                # lists.
+        kwargs["usecols"] = columns
+
+    if dtype is None:
+        dtype = {}
+
+    if isinstance(dtype, dict):
+        # Avoid reading numerical IDs as integers.
+        dtype["index_col"] = "string"
+
+        # Avoid reading year-only dates as integers.
+        dtype[METADATA_DATE_COLUMN] = "string"
+
+    elif isinstance(dtype, str):
+        if dtype != "string":
+            raise AugurError(f"""
+                dtype='{dtype}' converts values in all columns to be of type
+                '{dtype}'. However, values in columns '{index_col}' and
+                '{METADATA_DATE_COLUMN}' must be treated as strings in Augur.
+                Specify dtype as a dict per column instead.
+            """)
+    else:
+        raise AugurError(f"Unsupported value for dtype: '{dtype}'")
+
+    kwargs["dtype"] = dtype
 
     return pd.read_csv(
         metadata_file,
-        **kwargs
+        **kwargs,
+        **PANDAS_READ_CSV_OPTIONS,
     )
 
 
-def read_table_to_dict(table, duplicate_reporting=DataErrorMethod.ERROR_FIRST, id_column=None):
+def read_table_to_dict(table, delimiters, duplicate_reporting=DataErrorMethod.ERROR_FIRST, id_column=None):
     """
     Read rows from *table* file and yield each row as a single dict.
 
     Will report duplicate records based on the *id_column* if requested via
     *duplicate_reporting* after the generator has been exhausted.
 
+    When the *table* file is an Excel or OpenOffice workbook, only the first
+    visible worksheet will be read and initial empty rows/columns will be
+    ignored.
+
     Parameters
     ----------
     table: str
-        Path to a CSV or TSV file or IO buffer
+        Path to a CSV, TSV, Excel, or OpenOffice file or binary IO buffer
+
+    delimiters : list of str
+        List of possible delimiters to check for between columns in the metadata.
+        Only one delimiter will be inferred.
+        Ignored if *table* is an Excel or OpenOffice file.
 
     duplicate_reporting: DataErrorMethod, optional
         How should duplicate records be reported
@@ -127,42 +196,96 @@ def read_table_to_dict(table, duplicate_reporting=DataErrorMethod.ERROR_FIRST, i
 
     Raises
     ------
-    AugurError:
+    AugurError
         Raised for any of the following reasons:
         1. There are parsing errors from the csv standard library
         2. The provided *id_column* does not exist in the *metadata*
         3. The *duplicate_reporting* method is set to ERROR_FIRST or ERROR_ALL and duplicate(s) are found
     """
-    valid_delimiters = [',', '\t']
     seen_ids = set()
     duplicate_ids = set()
-    with open_file(table) as handle:
-        # Get sample to determine delimiter
-        table_sample = handle.readline()
+    with open_file(table, "rb") as handle:
+        # open_file(x, "rb") will return x as-is if it's already a file handle,
+        # and in that case the handle might be text mode even though we asked
+        # for bytes.  This assertion guards against usage errors in our caller.
+        assert isinstance(handle.read(0), bytes)
 
+        columns = None
+        records = None
+
+        # Try binary handle as Excel/OpenOffice, as long as it's seekable so we
+        # can reset to the start on failure.
         if handle.seekable():
-            handle.seek(0)
-        else:
-            table_sample_file = StringIO(table_sample)
-            handle = chain(table_sample_file, handle)
+            try:
+                workbook = calamine.load_workbook(handle)
+            except calamine.CalamineError:
+                handle.seek(0)
+            else:
+                def visible_worksheet(s: calamine.SheetMetadata) -> bool:
+                    # Normally one would use "is" to compare to an enum, but
+                    # these aren't actual Python enum.Enum classes.
+                    return s.visible == calamine.SheetVisibleEnum.Visible \
+                       and s.typ == calamine.SheetTypeEnum.WorkSheet
 
-        try:
-            dialect = csv.Sniffer().sniff(table_sample, valid_delimiters)
-        except csv.Error as err:
-            raise AugurError(
-                f"Could not determine the delimiter of {table!r}. "
-                "File must be a CSV or TSV."
-            ) from err
+                if not (sheet := next(filter(visible_worksheet, workbook.sheets_metadata), None)):
+                    if not workbook.sheets_metadata:
+                        error_msg = f"Excel/OpenOffice workbook {table!r} contains no sheets."
+                    else:
+                        error_msg = dedent(f"""\
+                            Excel/OpenOffice workbook {table!r} contains no visible worksheets.
 
-        metadata_reader = csv.DictReader(handle, dialect=dialect)
+                            {len(workbook.sheets_metadata)} other sheets found:
+                            """)
+
+                        for sheet in workbook.sheets_metadata:
+                            type = str(sheet.typ).replace('SheetTypeEnum.', '').lower()
+                            visibility = str(sheet.visible).replace('SheetVisibleEnum.', '').lower()
+                            error_msg += f"  - {sheet.name!r} ({type=!s}, {visibility=!s})\n"
+
+                    raise AugurError(error_msg)
+
+                rows = workbook.get_sheet_by_name(sheet.name).to_python(skip_empty_area=True)
+                columns = rows[0]
+                records = (
+                    dict(zip_longest(columns, row[:len(columns)]))
+                        for row
+                         in rows[1:])
+
+        # Not Excel/OpenOffice, so convert handle to text and sniff the delimiter.
+        if records is None:
+            handle = TextIOWrapper(handle, encoding="utf-8", newline="")
+
+            # Get sample to determine delimiter
+            table_sample = handle.readline()
+
+            if handle.seekable():
+                handle.seek(0)
+            else:
+                table_sample_file = StringIO(table_sample)
+                handle = chain(table_sample_file, handle)
+
+            try:
+                # Note: this sort of duplicates _get_delimiter(), but it's easier if
+                # this is separate since it handles non-seekable buffers.
+                dialect = csv.Sniffer().sniff(table_sample, delimiters)
+            except csv.Error as error:
+                # This assumes all csv.Errors imply a delimiter issue. That might
+                # change in a future Python version.
+                raise InvalidDelimiter from error
+
+            # Only use the dialect delimiter and keep all other default format params
+            metadata_reader = csv.DictReader(handle, delimiter=dialect.delimiter)
+
+            columns, records = metadata_reader.fieldnames, iter(metadata_reader)
+
         if duplicate_reporting is DataErrorMethod.SILENT:
             # Directly yield from metadata reader since we do not need to check for duplicate ids
-            yield from metadata_reader
+            yield from records
         else:
             if id_column is None:
-                id_column = metadata_reader.fieldnames[0]
+                id_column = columns[0]
 
-            for record in metadata_reader:
+            for record in records:
                 record_id = record.get(id_column)
                 if record_id is None:
                     raise AugurError(f"The provided id column {id_column!r} does not exist in {table!r}.")
@@ -194,7 +317,7 @@ def read_table_to_dict(table, duplicate_reporting=DataErrorMethod.ERROR_FIRST, i
             raise ValueError(f"Encountered unhandled duplicate reporting method: {duplicate_reporting!r}")
 
 
-def read_metadata_with_sequences(metadata, fasta, seq_id_column, seq_field='sequence',
+def read_metadata_with_sequences(metadata, metadata_delimiters, fasta, seq_id_column, seq_field='sequence',
     unmatched_reporting=DataErrorMethod.ERROR_FIRST, duplicate_reporting=DataErrorMethod.ERROR_FIRST):
     """
     Read rows from *metadata* file and yield each row as a single dict that has
@@ -219,10 +342,18 @@ def read_metadata_with_sequences(metadata, fasta, seq_id_column, seq_field='sequ
     See pyfastx docs for more details:
     https://pyfastx.readthedocs.io/en/latest/usage.html#fasta
 
+    When the *metadata* file is an Excel or OpenOffice workbook, only the first
+    visible worksheet will be read and initial empty rows/columns will be
+    ignored.
+
     Parameters
     ----------
     metadata: str
-        Path to a CSV or TSV metadata file
+        Path to a CSV, TSV, Excel, or OpenOffice metadata file or binary IO buffer
+
+    metadata_delimiters : list of str
+        List of possible delimiters to check for between columns in the metadata.
+        Ignored if *metadata* is an Excel or OpenOffice file.
 
     fasta: str
         Path to a plain or gzipped FASTA file
@@ -286,7 +417,7 @@ def read_metadata_with_sequences(metadata, fasta, seq_id_column, seq_field='sequ
 
     # Silencing duplicate reporting here because we will need to handle duplicates
     # in both the metadata and FASTA files after processing all the records here.
-    for record in read_table_to_dict(metadata, duplicate_reporting=DataErrorMethod.SILENT):
+    for record in read_table_to_dict(metadata, metadata_delimiters, duplicate_reporting=DataErrorMethod.SILENT):
         seq_id = record.get(seq_id_column)
 
         if seq_id is None:
@@ -307,10 +438,11 @@ def read_metadata_with_sequences(metadata, fasta, seq_id_column, seq_field='sequ
         else:
             processed_metadata_ids.add(seq_id)
 
-        # Skip records that do not have a matching sequence
-        # TODO: change this to try/except to fetch sequences and catch
-        # KeyError for non-existing sequences when https://github.com/lmdu/pyfastx/issues/50 is resolved
-        if seq_id not in sequence_ids:
+        try:
+            sequence_record = sequences[seq_id]
+        except KeyError:
+            # Skip records that do not have a matching sequence
+
             # Immediately raise an error if requested to error on the first unmatched record
             if unmatched_reporting is DataErrorMethod.ERROR_FIRST:
                 raise AugurError(f"Encountered metadata record {seq_id!r} without a matching sequence.")
@@ -391,7 +523,7 @@ def write_records_to_tsv(records, output_file):
 
     Parameters
     ----------
-    records: iterator[dict]
+    records: iterable of dict
         Iterator that yields dict that contains sequences
 
     output_file: str
@@ -417,10 +549,107 @@ def write_records_to_tsv(records, output_file):
             output_columns,
             extrasaction='ignore',
             delimiter='\t',
-            lineterminator='\n'
+            lineterminator='\n',
         )
         tsv_writer.writeheader()
         tsv_writer.writerow(first_record)
 
         for record in records:
             tsv_writer.writerow(record)
+
+
+class Metadata:
+    """Represents a metadata file."""
+
+    path: str
+    """Path to the file on disk."""
+
+    delimiter: str
+    """Inferred delimiter of metadata."""
+
+    columns: Sequence[str]
+    """Columns extracted from the first row in the metadata file."""
+
+    id_column: str
+    """Inferred ID column."""
+
+    def __init__(self, path: str, delimiters: Sequence[str], id_columns: Sequence[str]):
+        """
+        Parameters
+        ----------
+        path
+            Path of the metadata file.
+        delimiters
+            Possible delimiters to use, in order of precedence.
+        id_columns
+            Possible ID columns to use, in order of precedence.
+        """
+        self.path = path
+
+        # Infer the dialect.
+        self.delimiter = _get_delimiter(self.path, delimiters)
+
+        # Infer the column names.
+        with self.open() as f:
+            reader = csv.reader(f, delimiter=self.delimiter)
+            try:
+                self.columns = next(reader)
+            except StopIteration:
+                raise AugurError(f"{self.path}: Expected a header row but it is empty.")
+
+        # Infer the ID column.
+        self.id_column = self._find_id_column(id_columns)
+
+    def open(self, **kwargs):
+        """Open the file with auto-compression/decompression."""
+        return open_file(self.path, newline='', **kwargs)
+
+    def _find_id_column(self, columns: Sequence[str]):
+        """Return the first column in `columns` that is present in the metadata.
+        """
+        for column in columns:
+            if column in self.columns:
+                return column
+        raise AugurError(f"{self.path}: None of the possible id columns ({', '.join(map(repr, columns))}) were found in the metadata's columns ({', '.join(map(repr, self.columns))}).")
+
+    def rows(self, strict: bool = True):
+        """Yield rows in a dictionary format. Empty lines are ignored.
+
+        Parameters
+        ----------
+        strict
+            If True, raise an error when a row contains more or less than the number of expected columns.
+        """
+        with self.open() as f:
+            reader = csv.DictReader(f, delimiter=self.delimiter, fieldnames=self.columns, restkey=None, restval=None)
+
+            # Skip the header row.
+            next(reader)
+
+            # NOTE: Empty lines are ignored by csv.DictReader.
+            # <https://github.com/python/cpython/blob/647b6cc7f16c03535cede7e1748a58ab884135b2/Lib/csv.py#L181-L185>
+            for row in reader:
+                if strict:
+                    if None in row.keys():
+                        raise AugurError(f"{self.path}: Line {reader.line_num} contains at least one extra column. The inferred delimiter is {self.delimiter!r}.")
+                    if None in row.values():
+                        # This is distinct from a blank value (empty string).
+                        raise AugurError(f"{self.path}: Line {reader.line_num} is missing at least one column. The inferred delimiter is {self.delimiter!r}.")
+                yield row
+
+
+def _get_delimiter(path: str, valid_delimiters: Iterable[str]):
+    """Get the delimiter of a file given a list of valid delimiters."""
+
+    for delimiter in valid_delimiters:
+        if len(delimiter) != 1:
+            raise AugurError(f"Delimiters must be single-character strings. {delimiter!r} does not satisfy that condition.")
+
+    with open_file(path, newline='') as file:
+        try:
+            # Infer the delimiter from the first line.
+            return csv.Sniffer().sniff(file.readline(), "".join(valid_delimiters)).delimiter
+        except csv.Error as error:
+            # This assumes all csv.Errors imply a delimiter issue. That might
+            # change in a future Python version.
+            raise InvalidDelimiter from error

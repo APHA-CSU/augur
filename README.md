@@ -32,13 +32,15 @@ Try out an analysis of real virus data by [completing the Zika tutorial](https:/
 * [Overview of how Augur fits together with other Nextstrain tools](https://docs.nextstrain.org/en/latest/learn/parts.html)
 * [Overview of Augur usage](https://docs.nextstrain.org/projects/augur/en/stable/usage/usage.html)
 * [Technical documentation for Augur](https://docs.nextstrain.org/projects/augur/en/stable/installation/installation.html)
-* [Contributor guide](https://github.com/nextstrain/.github/blob/master/CONTRIBUTING.md)
+* [Contributor guide](https://github.com/nextstrain/.github/blob/-/CONTRIBUTING.md)
 * [Developer docs for Augur](./docs/contribute/DEV_DOCS.md)
 * [Changelog](./CHANGES.md)
 
 ## Citation
 
 Huddleston J, Hadfield J, Sibley TR, Lee J, Fay K, Ilcisin M, Harkins E, Bedford T, Neher RA, Hodcroft EB, (2021). Augur: a bioinformatics toolkit for phylogenetic analyses of human pathogens. Journal of Open Source Software, 6(57), 2906, https://doi.org/10.21105/joss.02906
+
+For other formats, refer to [CITATION.cff](./CITATION.cff).
 
 ## License and copyright
 

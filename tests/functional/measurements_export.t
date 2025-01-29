@@ -1,7 +1,7 @@
 Integration tests for augur measurements export.
 
+  $ source "$TESTDIR"/_setup.sh
   $ pushd "$TESTDIR" > /dev/null
-  $ export AUGUR="../../bin/augur"
 
 Minimal measurements export with existing strain and value columns.
 
@@ -134,4 +134,24 @@ Measurements export for a single collection using a collection config and comman
   >   --output-json "$TMP/single_collection_with_overrides_measurements.json" &>/dev/null
 
   $ python3 "$TESTDIR/../../scripts/diff_jsons.py" measurements_export/single_collection_with_overrides_measurements.json "$TMP/single_collection_with_overrides_measurements.json"
+  {}
+
+Measurements export for a single collection using a collection config and command-line overrides with multiple thresholds.
+
+  $ ${AUGUR} measurements export \
+  >   --collection measurements_export/collection.tsv \
+  >   --collection-config measurements_export/collection_config.json \
+  >   --grouping-column field_3 \
+  >   --key override-collection \
+  >   --title override-collection-display-title \
+  >   --x-axis-label override-label \
+  >   --thresholds 2.0 0.0 \
+  >   --filters field_3 \
+  >   --group-by field_3 \
+  >   --measurements-display raw \
+  >   --hide-overall-mean \
+  >   --hide-threshold \
+  >   --output-json "$TMP/single_collection_with_multiple_thresholds.json" &>/dev/null
+
+  $ python3 "$TESTDIR/../../scripts/diff_jsons.py" measurements_export/single_collection_with_multiple_thresholds.json "$TMP/single_collection_with_multiple_thresholds.json"
   {}

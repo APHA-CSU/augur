@@ -1,8 +1,6 @@
 import Bio.SeqIO
 import Bio.Seq
-import pytest
 from pathlib import Path
-import unittest
 import sys
 
 # make sure we get the local version of parse
@@ -73,7 +71,9 @@ class TestParse:
             sequence_record,
             fields=fields,
             strain_key="strain",
-            prettify_fields=["region"]
+            separator="|",
+            prettify_fields=["region"],
+            fix_dates_format=None,
         )
 
         assert sequence.id == metadata["strain"]

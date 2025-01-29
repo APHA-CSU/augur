@@ -17,12 +17,12 @@ else
 fi
 
 echo "Running unit tests and doctests with pytest"
-python3 -m pytest -c pytest.python3.ini $coverage_arg "$@"
+python3 -m pytest $coverage_arg "$@"
 
 # Only run functional tests if we are not running a subset of tests for pytest.
 if [ "$partial_test" = 0 ]; then
     echo "Running functional tests with cram"
-    cram --shell=/bin/bash tests/
+    cram tests/
 else
     echo "Skipping functional tests when running a subset of unit tests"
 fi

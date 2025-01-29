@@ -1,16 +1,19 @@
 """Count occurrence of bases in a set of sequences.
 """
 
-from Bio import SeqIO
 from itertools import combinations
-import Bio.Seq
-import Bio.SeqRecord
-import sys
 import csv
 
 from .io.file import open_file
 from .io.sequences import read_sequences
-from .io.vcf import is_vcf, read_vcf
+from .io.vcf import is_vcf
+from treetime.vcf_utils import read_vcf
+
+
+
+DELIMITER = '\t'
+ID_COLUMN = 'strain'
+
 
 def register_parser(parent_subparsers):
     parser = parent_subparsers.add_parser("index", help=__doc__)
@@ -26,9 +29,9 @@ def index_vcf(vcf_path, index_path):
 
     Parameters
     ----------
-    vcf_path : str or Path-like
+    vcf_path : str or `os.PathLike`
         path to a VCF file to index.
-    index_path : str or Path-like
+    index_path : str or `os.PathLike`
         path to a tab-delimited file containing the composition details for each
         sequence in the given input file.
 
@@ -38,14 +41,15 @@ def index_vcf(vcf_path, index_path):
         number of strains indexed
 
     """
-    strains, _ = read_vcf(vcf_path)
+    strains = list(read_vcf(vcf_path)['sequences'].keys())
+
     num_of_seqs = 0
 
-    with open_file(index_path, 'wt') as out_file:
-        tsv_writer = csv.writer(out_file, delimiter = '\t')
+    with open_file(index_path, 'wt', newline='') as out_file:
+        tsv_writer = csv.writer(out_file, delimiter = DELIMITER)
 
         #write header i output file
-        header = ['strain']
+        header = [ID_COLUMN]
         tsv_writer.writerow(header)
 
         for record in strains:
@@ -63,7 +67,7 @@ def index_sequence(sequence, values):
     sequence : Bio.SeqRecord.SeqRecord
         sequence record to index.
 
-    values : list of sets of str
+    values : list of set of str
         values to count; sets must be non-overlapping and contain only
         single-character, lowercase strings
 
@@ -74,7 +78,9 @@ def index_sequence(sequence, values):
         for the given values, and a final column with the number of characters
         that didn't match any of those in the given values.
 
-
+    Examples
+    --------
+    >>> import Bio
     >>> other_IUPAC = {'r', 'y', 's', 'w', 'k', 'm', 'd', 'h', 'b', 'v'}
     >>> values = [{'a'},{'c'},{'g'},{'t'},{'n'}, other_IUPAC, {'-'}, {'?'}]
     >>> sequence_a = Bio.SeqRecord.SeqRecord(seq=Bio.Seq.Seq("ACTGN-?XWN"), id="seq_A")
@@ -153,10 +159,10 @@ def index_sequences(sequences_path, sequence_index_path):
 
     Parameters
     ----------
-    sequences_path : str or Path-like
+    sequences_path : str or `os.PathLike`
         path to a sequence file to index.
 
-    sequence_index_path : str or Path-like
+    sequence_index_path : str or `os.PathLike`
         path to a tab-delimited file containing the composition details for each
         sequence in the given input file.
 
@@ -178,11 +184,11 @@ def index_sequences(sequences_path, sequence_index_path):
     tot_length = 0
     num_of_seqs = 0
 
-    with open_file(sequence_index_path, 'wt') as out_file:
+    with open_file(sequence_index_path, 'wt', newline='') as out_file:
         tsv_writer = csv.writer(out_file, delimiter = '\t', lineterminator='\n')
 
         #write header i output file
-        header = ['strain', 'length']+labels+['invalid_nucleotides']
+        header = [ID_COLUMN, 'length']+labels+['invalid_nucleotides']
         tsv_writer.writerow(header)
 
         for record in seqs:
@@ -202,15 +208,11 @@ def run(args):
     ("?" and "-"), and other invalid characters in a set of sequences and write
     the composition as a data frame to the given sequence index path.
     '''
-    try:
-        if is_vcf(args.sequences):
-            num_of_seqs = index_vcf(args.sequences, args.output)
-            tot_length = None
-        else:
-            num_of_seqs, tot_length = index_sequences(args.sequences, args.output)
-    except FileNotFoundError:
-        print(f"ERROR: Could not open sequences file '{args.sequences}'.", file=sys.stderr)
-        return 1
+    if is_vcf(args.sequences):
+        num_of_seqs = index_vcf(args.sequences, args.output)
+        tot_length = None
+    else:
+        num_of_seqs, tot_length = index_sequences(args.sequences, args.output)
 
     if args.verbose:
         if tot_length:

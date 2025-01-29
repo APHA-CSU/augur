@@ -1,14 +1,13 @@
 Setup
 
-  $ pushd "$TESTDIR" > /dev/null
-  $ export AUGUR="${AUGUR:-../../../../bin/augur}"
+  $ source "$TESTDIR"/_setup.sh
 
 Testing metadata inputs for the curate command.
 Running the `passthru` subcommand since it does not do any data transformations.
 
 Create metadata TSV file for testing.
 
-  $ cat >$TMP/metadata.tsv <<~~
+  $ cat >metadata.tsv <<~~
   > strain	country	date	authors
   > sequence_A	USA	2020-10-01	A,B,C,D,E,F,G,H,I,J,K
   > sequence_B	USA	2020-10-02	A,B,C,D,E,F,G,H,I,J,K
@@ -18,14 +17,14 @@ Create metadata TSV file for testing.
 Test TSV metadata input
 
   $ ${AUGUR} curate passthru \
-  > --metadata $TMP/metadata.tsv
+  > --metadata metadata.tsv
   {"strain": "sequence_A", "country": "USA", "date": "2020-10-01", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
   {"strain": "sequence_B", "country": "USA", "date": "2020-10-02", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
   {"strain": "sequence_C", "country": "USA", "date": "2020-10-03", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
 
 Test TSV metadata input from stdin
 
-  $ cat $TMP/metadata.tsv \
+  $ cat metadata.tsv \
   >   | ${AUGUR} curate normalize-strings \
   >     --metadata -
   {"strain": "sequence_A", "country": "USA", "date": "2020-10-01", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
@@ -34,7 +33,7 @@ Test TSV metadata input from stdin
 
 Create metadata CSV file for testing.
 
-  $ cat >$TMP/metadata.csv <<~~
+  $ cat >metadata.csv <<~~
   > strain,country,date
   > sequence_A,USA,2020-10-01
   > sequence_B,USA,2020-10-02
@@ -44,24 +43,76 @@ Create metadata CSV file for testing.
 Test CSV metadata input
 
   $ ${AUGUR} curate passthru \
-  > --metadata $TMP/metadata.csv
+  > --metadata metadata.csv
   {"strain": "sequence_A", "country": "USA", "date": "2020-10-01"}
   {"strain": "sequence_B", "country": "USA", "date": "2020-10-02"}
   {"strain": "sequence_C", "country": "USA", "date": "2020-10-03"}
 
 Test CSV metadata input from stdin
 
-  $ cat $TMP/metadata.csv \
+  $ cat metadata.csv \
   >   | ${AUGUR} curate normalize-strings \
   >     --metadata -
   {"strain": "sequence_A", "country": "USA", "date": "2020-10-01"}
   {"strain": "sequence_B", "country": "USA", "date": "2020-10-02"}
   {"strain": "sequence_C", "country": "USA", "date": "2020-10-03"}
 
+Test Excel (.xls) metadata input
+
+  $ ${AUGUR} curate passthru \
+  > --metadata "$TESTDIR/../data/metadata.xls"
+  {"strain": "sequence_A", "country": "USA", "date": "2020-10-01", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_B", "country": "USA", "date": "2020-10-02", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_C", "country": "USA", "date": "2020-10-03", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+
+Test Excel (.xlsx) metadata input
+
+  $ ${AUGUR} curate passthru \
+  > --metadata "$TESTDIR/../data/metadata.xlsx"
+  {"strain": "sequence_A", "country": "USA", "date": "2020-10-01", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_B", "country": "USA", "date": "2020-10-02", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_C", "country": "USA", "date": "2020-10-03", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+
+Test OpenOffice (.ods) metadata input
+
+  $ ${AUGUR} curate passthru \
+  > --metadata "$TESTDIR/../data/metadata.ods"
+  {"strain": "sequence_A", "country": "USA", "date": "2020-10-01", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_B", "country": "USA", "date": "2020-10-02", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_C", "country": "USA", "date": "2020-10-03", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+
+Excel (.xlsx) workbook, skipped rows/cols
+
+  $ ${AUGUR} curate passthru \
+  > --metadata "$TESTDIR/../data/metadata-skipped-areas.xlsx"
+  {"strain": "sequence_A", "country": "USA", "date": "2020-10-01", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_B", "country": "USA", "date": "2020-10-02", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_C", "country": "USA", "date": "2020-10-03", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+
+Excel (.xlsx) workbook, skipped hidden sheet
+
+  $ ${AUGUR} curate passthru \
+  > --metadata "$TESTDIR/../data/metadata-skipped-hidden-sheet.xlsx"
+  {"strain": "sequence_A", "country": "USA", "date": "2020-10-01", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_B", "country": "USA", "date": "2020-10-02", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+  {"strain": "sequence_C", "country": "USA", "date": "2020-10-03", "authors": "A,B,C,D,E,F,G,H,I,J,K"}
+
+Excel (.xlsx) workbook, no valid sheets
+
+  $ ${AUGUR} curate passthru \
+  > --metadata "$TESTDIR/../data/metadata-no-valid-sheet.xlsx"
+  ERROR: Excel/OpenOffice workbook '*/metadata-no-valid-sheet.xlsx' contains no visible worksheets. (glob)
+  
+  3 other sheets found:
+    - 'Hidden' (type=worksheet, visibility=hidden)
+    - 'VeryHidden' (type=worksheet, visibility=veryhidden)
+    - 'Chart' (type=chartsheet, visibility=visible)
+  
+  [2]
 
 Create a metadata TSV file with duplicate records
 
-  $ cat >$TMP/metadata.tsv <<~~
+  $ cat >metadata.tsv <<~~
   > strain	country	date
   > sequence_A	USA	2020-10-01
   > sequence_B	USA	2020-10-02
@@ -75,7 +126,7 @@ Test default options for duplicate records, which is expected for exit with an e
 There will still be output due to the nature of the chained generators in augur curate.
 
   $ ${AUGUR} curate passthru \
-  > --metadata $TMP/metadata.tsv
+  > --metadata metadata.tsv
   ERROR: Encountered record with duplicate id 'sequence_A' in .* (re)
   {"strain": "sequence_A", "country": "USA", "date": "2020-10-01"}
   {"strain": "sequence_B", "country": "USA", "date": "2020-10-02"}
@@ -85,7 +136,7 @@ There will still be output due to the nature of the chained generators in augur 
 Test error_all on duplicate records.
 
   $ ${AUGUR} curate passthru \
-  > --metadata $TMP/metadata.tsv \
+  > --metadata metadata.tsv \
   > --duplicate-reporting error_all
   ERROR: The following records are duplicated in .* (re)
   'sequence_A'
@@ -102,7 +153,7 @@ Test error_all on duplicate records.
 Test warning on duplicate records.
 
   $ ${AUGUR} curate passthru \
-  > --metadata $TMP/metadata.tsv \
+  > --metadata metadata.tsv \
   > --duplicate-reporting warn
   WARNING: Encountered record with duplicate id 'sequence_A' in .* (re)
   WARNING: Encountered record with duplicate id 'sequence_B' in .* (re)
@@ -121,7 +172,7 @@ Test warning on duplicate records.
 Test silent on duplicate records.
 
   $ ${AUGUR} curate passthru \
-  > --metadata $TMP/metadata.tsv \
+  > --metadata metadata.tsv \
   > --duplicate-reporting silent
   {"strain": "sequence_A", "country": "USA", "date": "2020-10-01"}
   {"strain": "sequence_B", "country": "USA", "date": "2020-10-02"}
@@ -133,7 +184,7 @@ Test silent on duplicate records.
 Test duplicate records with a bogus id column, which is expected to fail with an error.
 
   $ ${AUGUR} curate passthru \
-  > --metadata $TMP/metadata.tsv \
+  > --metadata metadata.tsv \
   > --id-column "bogus_id"
   ERROR: The provided id column 'bogus_id' does not exist in .* (re)
   [2]

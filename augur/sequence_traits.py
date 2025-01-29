@@ -6,6 +6,7 @@ import sys
 import numpy as np
 from treetime.vcf_utils import read_vcf
 from collections import defaultdict
+from .io.file import PANDAS_READ_CSV_OPTIONS, open_file
 from .utils import write_json, get_json_name
 
 def read_in_translate_vcf(vcf_file, ref_file):
@@ -46,12 +47,14 @@ def read_in_translate_vcf(vcf_file, ref_file):
     altLoc = 0
     sampLoc = 9
 
-    #Use different openers depending on whether compressed
-    opn = gzip.open if vcf_file.endswith(('.gz', '.GZ')) else open
+    with open_file(vcf_file, mode='rt') as f:
+        samps = []
 
-    with opn(vcf_file, mode='rt') as f:
         for line in f:
             if line[0] != '#':
+                # Sample names should have been extracted from '#' lines.
+                assert len(samps) != 0
+
                 #actual data
                 dat = line.strip().split('\t')
                 POS = int(dat[posLoc])
@@ -163,7 +166,7 @@ def read_in_features(drm_file):
 
     mutPositions = defaultdict(list)
 
-    df = pd.read_csv(drm_file, sep='\t' if drm_file.endswith('.tsv') else ',')
+    df = pd.read_csv(drm_file, sep='\t' if drm_file.endswith('.tsv') else ',', **PANDAS_READ_CSV_OPTIONS)
     for mi, m in df.iterrows():
         pos = m.SITE-1 #put in python numbering
         gene = m.GENE if hasattr(m, 'GENE') else 'nuc'
@@ -256,7 +259,7 @@ def attach_features(annotations, label, count):
     ----------
     annotations : dict
         annotations fo stgrains as globed together by `annotate_strains`
-    label : label
+    label : str
         label of the feature set as specified by as command line argument
     count : str
         if equal to traits, will count the number of distinct features that

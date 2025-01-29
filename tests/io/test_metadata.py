@@ -1,10 +1,9 @@
 import pytest
 import shutil
-import sys
-from io import StringIO
+from io import BytesIO
 
 from augur.errors import AugurError
-from augur.io.metadata import read_table_to_dict, read_metadata_with_sequences, write_records_to_tsv
+from augur.io.metadata import InvalidDelimiter, read_table_to_dict, read_metadata_with_sequences, write_records_to_tsv, Metadata
 from augur.types import DataErrorMethod
 
 
@@ -13,7 +12,8 @@ def expected_record():
     return {
         'strain': 'SEQ_A',
         'date': '2020-10-03',
-        'country': 'USA'
+        'country': 'USA',
+        'lab': 'A Virology Lab "Vector"'
     }
 
 @pytest.fixture
@@ -27,40 +27,33 @@ def metadata_with_duplicate(tmpdir):
         fh.write('SEQ_B\t2020-10-03\tUSA\n')
     return path
 
-@pytest.fixture
-def mp_context(monkeypatch):
-    with monkeypatch.context() as mp:
-        yield mp
-
 class TestReadMetadataToDict:
     def test_read_table_to_dict_with_csv(self, tmpdir, expected_record):
         path = str(tmpdir / 'metadata.csv')
         with open(path, 'w') as fh:
-            fh.write('strain,date,country\n')
-            fh.write('SEQ_A,2020-10-03,USA\n')
+            fh.write('strain,date,country,lab\n')
+            fh.write('SEQ_A,2020-10-03,USA,A Virology Lab "Vector"\n')
 
-        record = next(read_table_to_dict(path))
+        record = next(read_table_to_dict(path, (',')))
         assert record == expected_record
 
-    def test_read_table_to_dict_with_csv_from_stdin(self, mp_context, expected_record):
-        stdin = StringIO('strain,date,country\nSEQ_A,2020-10-03,USA\n')
-        mp_context.setattr('sys.stdin', stdin)
-        record = next(read_table_to_dict(sys.stdin))
+    def test_read_table_to_dict_with_csv_from_handle(self, expected_record):
+        handle = BytesIO(b'strain,date,country,lab\nSEQ_A,2020-10-03,USA,A Virology Lab "Vector"\n')
+        record = next(read_table_to_dict(handle, (',')))
         assert record == expected_record
 
     def test_read_table_to_dict_with_tsv(self, tmpdir, expected_record):
         path = str(tmpdir / 'metadata.tsv')
         with open(path, 'w') as fh:
-            fh.write('strain\tdate\tcountry\n')
-            fh.write('SEQ_A\t2020-10-03\tUSA\n')
+            fh.write('strain\tdate\tcountry\tlab\n')
+            fh.write('SEQ_A\t2020-10-03\tUSA\tA Virology Lab "Vector"\n')
 
-        record = next(read_table_to_dict(path))
+        record = next(read_table_to_dict(path, ('\t')))
         assert record == expected_record
 
-    def test_read_table_to_dict_with_tsv_from_stdin(self, mp_context, expected_record):
-        stdin = StringIO('strain\tdate\tcountry\nSEQ_A\t2020-10-03\tUSA\n')
-        mp_context.setattr('sys.stdin', stdin)
-        record = next(read_table_to_dict(sys.stdin))
+    def test_read_table_to_dict_with_tsv_from_handle(self, expected_record):
+        handle = BytesIO(b'strain\tdate\tcountry\tlab\nSEQ_A\t2020-10-03\tUSA\tA Virology Lab "Vector"\n')
+        record = next(read_table_to_dict(handle, ('\t')))
         assert record == expected_record
 
     def test_read_table_to_dict_with_bad_delimiter(self, tmpdir):
@@ -69,26 +62,24 @@ class TestReadMetadataToDict:
             fh.write('strain date country\n')
             fh.write('SEQ_A 2020-10-03 USA\n')
 
-        with pytest.raises(AugurError) as e_info:
-            next(read_table_to_dict(path))
-
-        assert str(e_info.value) == f"Could not determine the delimiter of {path!r}. File must be a CSV or TSV."
+        with pytest.raises(InvalidDelimiter):
+            next(read_table_to_dict(path, (',', '\t')))
 
     @pytest.mark.parametrize('id_column', ['strain', None])
     def test_read_table_to_dict_with_duplicates(self, metadata_with_duplicate, id_column):
         with pytest.raises(AugurError) as e_info:
-            list(read_table_to_dict(metadata_with_duplicate, id_column=id_column))
+            list(read_table_to_dict(metadata_with_duplicate, ('\t'), id_column=id_column))
         assert str(e_info.value) == f"Encountered record with duplicate id 'SEQ_A' in {metadata_with_duplicate!r}"
 
     @pytest.mark.parametrize('id_column', ['strain', None])
     def test_read_table_to_dict_with_duplicates_error_all(self, metadata_with_duplicate, id_column):
         with pytest.raises(AugurError) as e_info:
-            list(read_table_to_dict(metadata_with_duplicate, DataErrorMethod("error_all"), id_column=id_column))
+            list(read_table_to_dict(metadata_with_duplicate, ('\t'), DataErrorMethod("error_all"), id_column=id_column))
         assert str(e_info.value) == f"The following records are duplicated in {metadata_with_duplicate!r}:\n'SEQ_A'\n'SEQ_B'"
 
     @pytest.mark.parametrize('id_column', ['strain', None])
     def test_read_table_to_dict_with_duplicates_warning(self, capsys, metadata_with_duplicate, id_column):
-        list(read_table_to_dict(metadata_with_duplicate, DataErrorMethod('warn'), id_column=id_column))
+        list(read_table_to_dict(metadata_with_duplicate, ('\t'), DataErrorMethod('warn'), id_column=id_column))
         captured = capsys.readouterr()
         assert captured.err == (
             f"WARNING: Encountered record with duplicate id 'SEQ_A' in {metadata_with_duplicate!r}\n"
@@ -97,13 +88,13 @@ class TestReadMetadataToDict:
         )
 
     def test_read_table_to_dict_with_duplicates_silent(self, capsys, metadata_with_duplicate):
-        list(read_table_to_dict(metadata_with_duplicate, DataErrorMethod('silent')))
+        list(read_table_to_dict(metadata_with_duplicate, ('\t'), DataErrorMethod('silent')))
         assert "WARNING" not in capsys.readouterr().err
 
     def test_read_table_to_dict_with_duplicate_and_bad_id(self, metadata_with_duplicate):
         id_column = "bad_id"
         with pytest.raises(AugurError) as e_info:
-            list(read_table_to_dict(metadata_with_duplicate, id_column=id_column))
+            list(read_table_to_dict(metadata_with_duplicate, ('\t'), id_column=id_column))
         assert str(e_info.value) == f"The provided id column {id_column!r} does not exist in {metadata_with_duplicate!r}."
 
 
@@ -194,7 +185,7 @@ def metadata_with_unmatched_and_dup(tmpdir, metadata_file):
 
 class TestReadMetadataWithSequence:
     def test_read_metadata_with_sequence(self, metadata_file, fasta_file):
-        records = list(read_metadata_with_sequences(metadata_file, fasta_file, 'strain'))
+        records = list(read_metadata_with_sequences(metadata_file, ('\t',), fasta_file, 'strain'))
         assert len(records) == 4
         for record in records:
             seq_base = record['strain'].split("_")[-1].upper()
@@ -204,18 +195,19 @@ class TestReadMetadataWithSequence:
     def test_read_metadata_with_sequences_with_bad_id(self, metadata_file, fasta_file):
         id_field = "bad_id"
         with pytest.raises(AugurError) as e_info:
-            next(read_metadata_with_sequences(metadata_file, fasta_file, id_field))
+            next(read_metadata_with_sequences(metadata_file, ('\t',), fasta_file, id_field))
         assert str(e_info.value) == f"The provided sequence id column {id_field!r} does not exist in the metadata."
 
     def test_read_metadata_with_sequences_with_unmatched(self, metadata_with_unmatched, fasta_with_unmatched):
         with pytest.raises(AugurError) as e_info:
-            list(read_metadata_with_sequences(metadata_with_unmatched, fasta_with_unmatched, 'strain'))
+            list(read_metadata_with_sequences(metadata_with_unmatched, ('\t',), fasta_with_unmatched, 'strain'))
         assert str(e_info.value) == "Encountered metadata record 'EXTRA_METADATA_A' without a matching sequence."
 
     def test_read_metadata_with_sequences_with_unmatched_error_all(self, metadata_with_unmatched, fasta_with_unmatched):
         with pytest.raises(AugurError) as e_info:
             list(read_metadata_with_sequences(
                 metadata_with_unmatched,
+                ('\t',),
                 fasta_with_unmatched,
                 'strain',
                 unmatched_reporting=DataErrorMethod.ERROR_ALL))
@@ -231,6 +223,7 @@ class TestReadMetadataWithSequence:
     def test_read_metadata_with_sequences_with_unmatched_warning(self, capsys, metadata_with_unmatched, fasta_with_unmatched):
         records = list(read_metadata_with_sequences(
             metadata_with_unmatched,
+            ('\t',),
             fasta_with_unmatched,
             'strain',
             unmatched_reporting=DataErrorMethod.WARN))
@@ -251,6 +244,7 @@ class TestReadMetadataWithSequence:
     def test_read_metadata_with_sequences_with_unmatched_silent(self, capsys, metadata_with_unmatched, fasta_with_unmatched):
         records = list(read_metadata_with_sequences(
             metadata_with_unmatched,
+            ('\t',),
             fasta_with_unmatched,
             'strain',
             unmatched_reporting=DataErrorMethod.SILENT))
@@ -260,17 +254,17 @@ class TestReadMetadataWithSequence:
 
     def test_read_metadata_with_sequences_with_dup_metadata(self, metadata_with_dup, fasta_file):
         with pytest.raises(AugurError) as e_info:
-            list(read_metadata_with_sequences(metadata_with_dup, fasta_file, 'strain'))
+            list(read_metadata_with_sequences(metadata_with_dup, ('\t',), fasta_file, 'strain'))
         assert str(e_info.value) == "Encountered metadata record with duplicate id 'SEQ_C'."
 
     def test_read_metadata_with_sequences_with_dup_fasta(self, metadata_file, fasta_with_dup):
         with pytest.raises(AugurError) as e_info:
-            list(read_metadata_with_sequences(metadata_file, fasta_with_dup, 'strain'))
+            list(read_metadata_with_sequences(metadata_file, ('\t',), fasta_with_dup, 'strain'))
         assert str(e_info.value) == "Encountered sequence record with duplicate id 'SEQ_A'."
 
     def test_read_metadata_with_sequences_with_dup_both(self, metadata_with_dup, fasta_with_dup):
         with pytest.raises(AugurError) as e_info:
-            list(read_metadata_with_sequences(metadata_with_dup, fasta_with_dup, 'strain'))
+            list(read_metadata_with_sequences(metadata_with_dup, ('\t',), fasta_with_dup, 'strain'))
         # Expected to error on first duplicate sequence since we check sequences first
         assert str(e_info.value) == "Encountered sequence record with duplicate id 'SEQ_A'."
 
@@ -278,6 +272,7 @@ class TestReadMetadataWithSequence:
         with pytest.raises(AugurError) as e_info:
             list(read_metadata_with_sequences(
                 metadata_with_dup,
+                ('\t',),
                 fasta_with_dup,
                 'strain',
                 duplicate_reporting=DataErrorMethod.ERROR_ALL
@@ -294,6 +289,7 @@ class TestReadMetadataWithSequence:
     def test_read_metadata_with_sequences_with_dup_warn(self, capsys, metadata_with_dup, fasta_with_dup):
         records = list(read_metadata_with_sequences(
             metadata_with_dup,
+            ('\t',),
             fasta_with_dup,
             'strain',
             duplicate_reporting=DataErrorMethod.WARN
@@ -317,6 +313,7 @@ class TestReadMetadataWithSequence:
     def test_read_metadata_with_sequences_with_dup_silent(self, capsys, metadata_with_dup, fasta_with_dup):
         records = list(read_metadata_with_sequences(
             metadata_with_dup,
+            ('\t',),
             fasta_with_dup,
             'strain',
             duplicate_reporting=DataErrorMethod.SILENT
@@ -327,7 +324,7 @@ class TestReadMetadataWithSequence:
 
     def test_read_metadata_with_sequences_with_extra_and_dup(self, metadata_with_unmatched_and_dup, fasta_with_unmatched_and_dup):
         with pytest.raises(AugurError) as e_info:
-            list(read_metadata_with_sequences(metadata_with_unmatched_and_dup, fasta_with_unmatched_and_dup, 'strain'))
+            list(read_metadata_with_sequences(metadata_with_unmatched_and_dup, ('\t',), fasta_with_unmatched_and_dup, 'strain'))
         # Expected to error on first duplicate sequence since we check duplicate sequences first
         assert str(e_info.value) == "Encountered sequence record with duplicate id 'SEQ_A'."
 
@@ -335,6 +332,7 @@ class TestReadMetadataWithSequence:
         with pytest.raises(AugurError) as e_info:
             list(read_metadata_with_sequences(
                 metadata_with_unmatched_and_dup,
+                ('\t',),
                 fasta_with_unmatched_and_dup,
                 'strain',
                 unmatched_reporting=DataErrorMethod.ERROR_ALL,
@@ -358,6 +356,7 @@ class TestReadMetadataWithSequence:
         with pytest.raises(AugurError) as e_info:
             list(read_metadata_with_sequences(
                 metadata_with_unmatched_and_dup,
+                ('\t',),
                 fasta_with_unmatched_and_dup,
                 'strain',
                 unmatched_reporting=DataErrorMethod.WARN,
@@ -387,6 +386,7 @@ class TestReadMetadataWithSequence:
         with pytest.raises(AugurError) as e_info:
             list(read_metadata_with_sequences(
                 metadata_with_unmatched_and_dup,
+                ('\t',),
                 fasta_with_unmatched_and_dup,
                 'strain',
                 unmatched_reporting=DataErrorMethod.ERROR_ALL,
@@ -418,6 +418,7 @@ class TestReadMetadataWithSequence:
     def test_read_metadata_with_sequences_with_extra_and_dup_warn_both(self, capsys, metadata_with_unmatched_and_dup, fasta_with_unmatched_and_dup):
         records = list(read_metadata_with_sequences(
             metadata_with_unmatched_and_dup,
+            ('\t',),
             fasta_with_unmatched_and_dup,
             'strain',
             unmatched_reporting=DataErrorMethod.WARN,
@@ -449,7 +450,7 @@ class TestReadMetadataWithSequence:
 @pytest.fixture
 def output_records():
     return iter([
-        {"strain": "SEQ_A", "country": "USA", "date": "2020-10-01"},
+        {"strain": "SEQ_A", "country": "\"USA\"", "date": "2020-10-01"},
         {"strain": "SEQ_T", "country": "USA", "date": "2020-10-02"}
     ])
 
@@ -457,7 +458,7 @@ def output_records():
 def expected_output_tsv():
     return (
         "strain\tcountry\tdate\n"
-        "SEQ_A\tUSA\t2020-10-01\n"
+        'SEQ_A\t"""USA"""\t2020-10-01\n'
         "SEQ_T\tUSA\t2020-10-02\n"
     )
 
@@ -505,3 +506,117 @@ class TestWriteRecordsToTsv:
             write_records_to_tsv(iter([]), output_file)
 
         assert str(e_info.value) == f"Unable to write records to {output_file} because provided records were empty."
+
+
+def write_lines(tmpdir, lines):
+    path = str(tmpdir / "tmp")
+    with open(path, 'w', newline='') as f:
+        f.writelines(lines)
+    return path
+
+
+class TestMetadataClass:
+    def test_attributes(self, metadata_file):
+        """All attributes are populated."""
+        m = Metadata(metadata_file, delimiters=[',', '\t'], id_columns=['invalid', 'strain'])
+        assert m.path == metadata_file
+        assert m.delimiter == '\t'
+        assert m.columns == ['strain', 'country', 'date']
+        assert m.id_column == 'strain'
+
+    def test_invalid_delimiter(self, metadata_file):
+        """Failure to detect delimiter raises an error."""
+        with pytest.raises(InvalidDelimiter):
+            Metadata(metadata_file, delimiters=[':'], id_columns=['strain'])
+
+    def test_invalid_id_column(self, metadata_file):
+        """Failure to detect an ID column raises an error."""
+        with pytest.raises(AugurError):
+            Metadata(metadata_file, delimiters=['\t'], id_columns=['strains'])
+
+    def test_rows(self, metadata_file):
+        """Check Metadata.rows() output format."""
+        m = Metadata(metadata_file, delimiters=['\t'], id_columns=['strain'])
+        assert list(m.rows()) == [
+            {'country': 'USA', 'date': '2020-10-01', 'strain': 'SEQ_A'},
+            {'country': 'USA', 'date': '2020-10-02', 'strain': 'SEQ_T'},
+            {'country': 'USA', 'date': '2020-10-03', 'strain': 'SEQ_C'},
+            {'country': 'USA', 'date': '2020-10-04', 'strain': 'SEQ_G'},
+        ]
+
+    def test_blank_lines(self, tmpdir):
+        """Check behavior of lines that are blank and have empty values.
+
+        Blank lines are skipped. Lines with delimiters but empty values are still included when reading.
+        """
+        path = write_lines(tmpdir, [
+            'a,b,c\n',
+            '1,2,3\n',
+            '\n',
+            '3,2,3\n',
+            ',,\n',
+            '5,2,3\n',
+        ])
+
+        m = Metadata(path, delimiters=',', id_columns=['a'])
+        assert list(m.rows()) == [
+            {'a': '1', 'b': '2', 'c': '3'},
+            {'a': '3', 'b': '2', 'c': '3'},
+            {'a': '' , 'b': '' , 'c': '' },
+            {'a': '5', 'b': '2', 'c': '3'}
+        ]
+
+    def test_rows_strict_extra(self, tmpdir):
+        """Test behavior when reading rows with extra entries or delimiters."""
+        path = write_lines(tmpdir, [
+            'a,b,c\n',
+            '1,2,3\n',
+            '2,2,3,4\n',
+            '3,2,3,\n',
+        ])
+
+        m = Metadata(path, delimiters=',', id_columns=['a'])
+        with pytest.raises(AugurError):
+            list(m.rows(strict=True))
+
+        assert list(m.rows(strict=False)) == [
+            {'a': '1', 'b': '2', 'c': '3'},
+            {'a': '2', 'b': '2', 'c': '3', None: ['4']},
+            {'a': '3', 'b': '2', 'c': '3', None: ['']},
+        ]
+
+    def test_rows_strict_missing(self, tmpdir):
+        """Test behavior when reading rows with missing entries or delimiters."""
+        path = write_lines(tmpdir, [
+            'a,b,c\n',
+            '1,2,3\n',
+            '2,2,\n',
+            '3,2\n',
+        ])
+
+        m = Metadata(path, delimiters=',', id_columns=['a'])
+        with pytest.raises(AugurError):
+            list(m.rows(strict=True))
+
+        assert list(m.rows(strict=False)) == [
+            {'a': '1', 'b': '2', 'c': '3'},
+            {'a': '2', 'b': '2', 'c': ''},
+            {'a': '3', 'b': '2', 'c': None},
+        ]
+
+    def test_rows_embedded_newline(self, tmpdir):
+        """Test behavior when reading rows with an embedded newline."""
+        path = write_lines(tmpdir, [
+            'a,b,c\n',
+            '1,2,3\n',
+            '4,"5\r\n6",7\n',
+            '8,9,10\n',
+        ])
+
+        m = Metadata(path, delimiters=',', id_columns=['a'])
+
+        assert list(m.rows()) == [
+            {'a': '1', 'b': '2', 'c': '3'},
+            {'a': '4', 'b': '5\r\n6', 'c': '7'},
+            {'a': '8', 'b': '9', 'c': '10'},
+        ]

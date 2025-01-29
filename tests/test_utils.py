@@ -1,5 +1,8 @@
+import json
+import numpy as np
 from pathlib import Path
 from unittest.mock import patch
+import pandas as pd
 
 import pytest
 
@@ -76,17 +79,20 @@ class TestUtils:
             fh.write("\n".join(drm_lines))
         assert utils.read_mask_file(drm_file) == expected_sites
 
-    def test_read_strains(self, tmpdir):
-        # Write one list of filenames with some unnecessary whitespace.
-        strains1 = Path(tmpdir) / Path("strains1.txt")
-        with open(strains1, "w") as oh:
-            oh.write("strain1 # this is an inline comment about strain 1\nstrain2\n   # this is a comment preceded by whitespace.\n")
-
-        # Write another list of filenames with a comment.
-        strains2 = Path(tmpdir) / Path("strains2.txt")
-        with open(strains2, "w") as oh:
-            oh.write("# this is a comment. ignore this.\nstrain2\nstrain3\n")
-
-        strains = utils.read_strains(strains1, strains2)
-        assert len(strains) == 3
-        assert "strain1" in strains
+    def test_write_json_data_types(self, tmpdir):
+        """write_json should be able to serialize various data types."""
+        data = {
+            'int': np.int64(1),
+            'float': np.float64(2.0),
+            'array': np.array([3,4,5]),
+            'series': pd.Series([6,7,8])
+        }
+        file = Path(tmpdir) / Path("data.json")
+        utils.write_json(data, file, include_version=False)
+        with open(file) as f:
+            assert json.load(f) == {
+                'int': 1,
+                'float': 2.0,
+                'array': [3,4,5],
+                'series': [6,7,8]
+            }

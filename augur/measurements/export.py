@@ -5,7 +5,8 @@ import os
 import pandas as pd
 import sys
 
-from augur.argparse_ import HideAsFalseAction
+from augur.argparse_ import ExtendOverwriteDefault, HideAsFalseAction
+from augur.io.file import PANDAS_READ_CSV_OPTIONS
 from augur.utils import first_line, write_json
 from augur.validate import (
     measurements as read_measurements_json,
@@ -54,7 +55,7 @@ def register_parser(parent_subparsers):
     )
     config.add_argument("--collection-config", metavar="JSON",
         help="Collection configuration file for advanced configurations. ")
-    config.add_argument("--grouping-column", nargs="+",
+    config.add_argument("--grouping-column", nargs="+", action=ExtendOverwriteDefault,
         help="Name of the column(s) that should be used as grouping(s) for measurements. " +
              "Note that if groupings are provided via command line args, the default group-by " +
              "field in the config JSON will be dropped.")
@@ -68,9 +69,9 @@ def register_parser(parent_subparsers):
         help="The short label to display for the x-axis that describles the value of the measurements. " +
              "If not provided via config or command line option, the panel's default " +
              f"x-axis label is {DEFAULT_ARGS['x_axis_label']!r}.")
-    config.add_argument("--threshold", type=float,
-        help="A measurements value threshold to be displayed in the measurements panel.")
-    config.add_argument("--filters", nargs="+",
+    config.add_argument("--thresholds", type=float, nargs="+", action=ExtendOverwriteDefault,
+        help="Measurements value threshold(s) to be displayed in the measurements panel.")
+    config.add_argument("--filters", nargs="+", action=ExtendOverwriteDefault,
         help="The columns that are to be used a filters for measurements. " +
              "If not provided, all columns will be available as filters.")
     config.add_argument("--group-by", type=str,
@@ -83,12 +84,12 @@ def register_parser(parent_subparsers):
         help="Show or hide the overall mean per group by default")
     config.add_argument("--show-threshold", "--hide-threshold",
         dest="show_threshold", action=HideAsFalseAction, nargs=0,
-        help="Show or hide the threshold by default. This will be ignored if no threshold is provided.")
+        help="Show or hide the threshold(s) by default. This will be ignored if no threshold(s) are provided.")
 
     optional = parser.add_argument_group(
         title="OPTIONAL SETTINGS"
     )
-    optional.add_argument("--include-columns", nargs="+",
+    optional.add_argument("--include-columns", nargs="+", action=ExtendOverwriteDefault,
         help="The columns to include from the collection TSV in the measurements JSON. " +
              "Be sure to list columns that are used as groupings and/or filters. " +
              "If no columns are provided, then all columns will be included by default.")
@@ -106,7 +107,7 @@ def run(args):
 
     # Load input collection TSV file
     try:
-        collection_df = pd.read_csv(args.collection, sep="\t", usecols=columns_to_include)
+        collection_df = pd.read_csv(args.collection, sep="\t", usecols=columns_to_include, **PANDAS_READ_CSV_OPTIONS)
     except FileNotFoundError:
         print(
             f"ERROR: collection TSV file {args.collection!r} does not exist",
@@ -207,8 +208,13 @@ def run(args):
         print("ERROR: Cannot create measurements JSON without valid groupings", file=sys.stderr)
         sys.exit(1)
 
+    # Convert deprecated single threshold value to list if "thresholds" not provided
+    single_threshold = collection_config.pop("threshold", None)
+    if single_threshold is not None and "thresholds" not in collection_config:
+        collection_config["thresholds"] = [single_threshold]
+
     # Combine collection config with command line args
-    config_key_args = ['key', 'title', 'filters', 'x_axis_label', 'threshold']
+    config_key_args = ['key', 'title', 'filters', 'x_axis_label', 'thresholds']
     display_default_args = ['group_by', 'measurements_display', 'show_overall_mean', 'show_threshold']
 
     for key_arg in config_key_args:

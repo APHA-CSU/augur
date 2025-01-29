@@ -1,13 +1,18 @@
 """
 Parse delimited fields from FASTA sequence names into a TSV and FASTA file.
 """
+import Bio.SeqRecord
 import pandas as pd
 import sys
+from typing import Dict, Sequence, Tuple
 
+from .argparse_ import ExtendOverwriteDefault
 from .io.file import open_file
 from .io.sequences import read_sequences, write_sequences
 from .dates import get_numerical_date_from_value
 from .errors import AugurError
+
+PARSE_DEFAULT_ID_COLUMNS = ("strain", "name")
 
 forbidden_characters = str.maketrans(
     {' ': None,
@@ -21,7 +26,7 @@ forbidden_characters = str.maketrans(
      '\\': '_'}
 )
 
-def fix_dates(d, dayfirst=True):
+def fix_dates(d: str, dayfirst: bool = True) -> str:
     '''
     attempt to parse a date string using pandas date parser. If ambiguous,
     the argument 'dayfirst' determines whether month or day is assumed to be
@@ -29,8 +34,18 @@ def fix_dates(d, dayfirst=True):
     On failure to parse the date, the function will return the input.
     '''
     try:
-        from pandas.core.tools.datetimes import parsing
-        results = parsing.parse_time_string(d, dayfirst=dayfirst)
+        try:
+            # pandas <= 2.1
+            from pandas.core.tools.datetimes import parsing  # type: ignore[attr-defined, import-not-found]
+        except ImportError:
+            # pandas >= 2.2
+            from pandas._libs.tslibs import parsing
+        try:
+            # pandas 2.x
+            results = parsing.parse_datetime_string_with_reso(d, dayfirst=dayfirst)
+        except AttributeError:
+            # pandas 1.x
+            results = parsing.parse_time_string(d, dayfirst=dayfirst)  # type: ignore[attr-defined]
         if len(results) == 2:
             dto, res = results
         else:
@@ -81,27 +96,34 @@ def prettify(x, trim=0, camelCase=False, etal=None, removeComma=False):
     return res
 
 
-def parse_sequence(sequence, fields, strain_key="strain", separator="|", prettify_fields=None, fix_dates_format=None):
+def parse_sequence(
+        sequence: Bio.SeqRecord.SeqRecord,
+        fields: Sequence[str],
+        strain_key: str,
+        separator: str,
+        prettify_fields: Sequence[str],
+        fix_dates_format: str,
+    ) -> Tuple[Bio.SeqRecord.SeqRecord, Dict[str, str]]:
     """Parse a single sequence record into a sequence record and associated metadata.
 
     Parameters
     ----------
-    sequence : Bio.SeqRecord.SeqRecord
+    sequence
         a BioPython sequence record to parse with metadata stored in its description field.
 
-    fields : list or tuple
+    fields
         a list of names for fields expected in the given record's description.
 
-    strain_key : str
+    strain_key
         name of the field to use as the given sequence's unique id
 
-    separator : str
+    separator
         delimiter to split record description by.
 
-    prettify_fields : list or tuple
+    prettify_fields
         a list of field names for which the values in those fields should be prettified.
 
-    fix_dates_format : str
+    fix_dates_format
         parse "date" field into the requested canonical format ("dayfirst" or "monthfirst").
 
     Returns
@@ -116,8 +138,8 @@ def parse_sequence(sequence, fields, strain_key="strain", separator="|", prettif
     sequence_fields = map(str.strip, sequence.description.split(separator))
     metadata = dict(zip(fields, sequence_fields))
 
-    tmp_name = metadata[strain_key].translate(forbidden_characters)
-    sequence.name = sequence.id = tmp_name
+    metadata[strain_key] = metadata[strain_key].translate(forbidden_characters)
+    sequence.name = sequence.id = metadata[strain_key]
     sequence.description = ''
 
     if prettify_fields:
@@ -127,13 +149,11 @@ def parse_sequence(sequence, fields, strain_key="strain", separator="|", prettif
                                             etal='lower' if field.startswith('author') else None)
 
     # parse dates and convert to a canonical format
-    if fix_dates and 'date' in metadata:
+    if fix_dates_format and 'date' in metadata:
         metadata['date'] = fix_dates(
             metadata['date'],
             dayfirst=fix_dates_format=='dayfirst'
         )
-
-    metadata["strain"] = sequence.id
 
     return sequence, metadata
 
@@ -141,10 +161,12 @@ def parse_sequence(sequence, fields, strain_key="strain", separator="|", prettif
 def register_parser(parent_subparsers):
     parser = parent_subparsers.add_parser("parse", help=__doc__)
     parser.add_argument('--sequences', '-s', required=True, help="sequences in fasta or VCF format")
-    parser.add_argument('--output-sequences', help="output sequences file")
-    parser.add_argument('--output-metadata', help="output metadata file")
-    parser.add_argument('--fields', nargs='+', help="fields in fasta header")
-    parser.add_argument('--prettify-fields', nargs='+', help="apply string prettifying operations (underscores to spaces, capitalization, etc) to specified metadata fields")
+    parser.add_argument('--output-sequences', required=True, help="output sequences file")
+    parser.add_argument('--output-metadata', required=True, help="output metadata file")
+    parser.add_argument('--output-id-field', required=False,
+                        help=f"The record field to use as the sequence identifier in the FASTA output. If not provided, this will use the first available of {PARSE_DEFAULT_ID_COLUMNS}. If none of those are available, this will use the first field in the fasta header.")
+    parser.add_argument('--fields', required=True, nargs='+', action=ExtendOverwriteDefault, help="fields in fasta header")
+    parser.add_argument('--prettify-fields', nargs='+', action=ExtendOverwriteDefault, help="apply string prettifying operations (underscores to spaces, capitalization, etc) to specified metadata fields")
     parser.add_argument('--separator', default='|', help="separator of fasta header")
     parser.add_argument('--fix-dates', choices=['dayfirst', 'monthfirst'],
                                 help="attempt to parse non-standard dates and output them in standard YYYY-MM-DD format")
@@ -162,12 +184,18 @@ def run(args):
     # field to index the dictionary and the data frame
     meta_data = {}
 
-    if 'name' in args.fields:
-        strain_key = 'name'
-    elif 'strain' in args.fields:
-        strain_key = 'strain'
+    strain_key = None
+    if args.output_id_field:
+        if args.output_id_field not in args.fields:
+            raise AugurError(f"Output id field '{args.output_id_field}' not found in fields {args.fields}.")
+        strain_key = args.output_id_field
     else:
-        strain_key = args.fields[0]
+        for possible_id in PARSE_DEFAULT_ID_COLUMNS:
+            if possible_id in args.fields:
+                strain_key = possible_id
+                break
+        if not strain_key:
+            strain_key = args.fields[0]
 
     # loop over sequences, parse fasta header of each sequence
     with open_file(args.output_sequences, "wt") as handle:

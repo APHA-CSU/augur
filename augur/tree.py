@@ -15,6 +15,8 @@ import numpy as np
 from treetime.vcf_utils import read_vcf
 from pathlib import Path
 
+from .errors import AugurError
+from .io.file import open_file
 from .io.sequences import read_sequences
 from .io.shell_command_runner import run_shell_command
 from .io.vcf import shquote
@@ -26,19 +28,22 @@ DEFAULT_ARGS = {
     # For compat with older versions of iqtree, we avoid the newish -fast
     # option alias and instead spell out its component parts:
     #
-    #     -ninit 2
+    #     --ninit 2
     #     -n 2
-    #     -me 0.05
+    #     --epsilon 0.05
     #
     # This may need to be updated in the future if we want to stay in lock-step
     # with -fast, although there's probably no particular reason we have to.
     # Refer to the handling of -fast in utils/tools.cpp:
     #   https://github.com/Cibiv/IQ-TREE/blob/44753aba/utils/tools.cpp#L2926-L2936
-    # Increasing threads (nt) can cause IQtree to run longer, hence use AUTO by default
-    # Auto makes IQtree chose the optimal number of threads
-    # Redo prevents IQtree errors when a run was aborted and restarted
-    "iqtree": "-ninit 2 -n 2 -me 0.05 -nt AUTO -redo",
+    # Increasing threads (-T) can cause IQtree to run longer, hence use AUTO by default
+    # -T AUTO makes IQtree chose the optimal number of threads
+    # --redo prevents IQtree errors when a run was aborted and restarted
+    "iqtree": "--ninit 2 -n 2 --epsilon 0.05 -T AUTO --redo",
 }
+
+# IQ-TREE only; see usage below
+DEFAULT_SUBSTITUTION_MODEL = "GTR"
 
 class ConflictingArgumentsException(Exception):
     """Exception when user-provided tree builder arguments conflict with the
@@ -64,13 +69,14 @@ def check_conflicting_args(tree_builder_args, defaults):
     ConflictingArgumentsException
         When any user-provided arguments match those in the defaults.
 
-
-    >>> defaults = ("-ntmax", "-m", "-s")
-    >>> check_conflicting_args("-czb -n 2", defaults)
-    >>> check_conflicting_args("-czb -ntmax 2", defaults)
+    Examples
+    --------
+    >>> defaults = ("--threads-max", "-m", "-s")
+    >>> check_conflicting_args("--polytomy -n 2", defaults)
+    >>> check_conflicting_args("--polytomy --threads-max 2", defaults)
     Traceback (most recent call last):
         ...
-    augur.tree.ConflictingArgumentsException: The following tree builder arguments conflict with hardcoded defaults. Remove these arguments and try again: -ntmax
+    augur.tree.ConflictingArgumentsException: The following tree builder arguments conflict with hardcoded defaults. Remove these arguments and try again: --threads-max
 
     """
     # Parse tree builder argument string into a list of shell arguments. This
@@ -108,7 +114,7 @@ def find_executable(names, default = None):
 
 def build_raxml(aln_file, out_file, clean_up=True, nthreads=1, tree_builder_args=None):
     '''
-    build tree using RAxML with parameters '-f d -m GTRCAT -c 25 -p 235813 -n tre"
+    build tree using RAxML
     '''
 
     raxml = find_executable([
@@ -142,16 +148,30 @@ def build_raxml(aln_file, out_file, clean_up=True, nthreads=1, tree_builder_args
           "\n\tIn Bioinformatics, 2014\n")
     try:
         run_shell_command(cmd, raise_errors = True)
-        shutil.copy("RAxML_bestTree.%s"%(random_string), out_file)
-        T = Phylo.read(out_file, 'newick')
-        if clean_up:
-            os.remove("RAxML_bestTree.%s"%(random_string))
-            os.remove("RAxML_info.%s"%(random_string))
-            os.remove("RAxML_parsimonyTree.%s"%(random_string))
-            os.remove("RAxML_result.%s"%(random_string))
 
-    except:
+        # When bootstrapping is enabled by custom tree_builder_args, RAxML
+        # outputs the tree with support values to a different file,
+        # "bipartitions".  If it exists, then use it; otherwise use "bestTree".
+        possible_tree_files = [
+            Path(f"RAxML_bipartitions.{random_string}"),    # best-scoring ML tree with support values
+            Path(f"RAxML_bestTree.{random_string}"),        # best-scoring ML tree
+        ]
+
+        tree = next((t for t in possible_tree_files if t.exists()), None)
+
+        if not tree:
+            raise AugurError(f"No RAxML output tree files found; looked for: {', '.join(map(repr, map(str, possible_tree_files)))}")
+
+        shutil.copy(str(tree), out_file)
+        T = Phylo.read(out_file, 'newick')
+
+        if clean_up:
+            for f in Path().glob(f"RAxML_*.{random_string}"):
+                f.unlink()
+
+    except Exception as error:
         print("ERROR: TREE BUILDING FAILED")
+        print(f"ERROR: {error}")
         if os.path.isfile("RAxML_log.%s"%(random_string)):
             print("Please see the log file for more details: {}".format("RAxML_log.%s"%(random_string)))
         T=None
@@ -161,7 +181,7 @@ def build_raxml(aln_file, out_file, clean_up=True, nthreads=1, tree_builder_args
 
 def build_fasttree(aln_file, out_file, clean_up=True, nthreads=1, tree_builder_args=None):
     '''
-    build tree using fasttree with parameters "-nt"
+    build tree using fasttree
     '''
     log_file = out_file + ".log"
 
@@ -195,8 +215,9 @@ def build_fasttree(aln_file, out_file, clean_up=True, nthreads=1, tree_builder_a
     try:
         run_shell_command(cmd, raise_errors = True, extra_env = extra_env)
         T = Phylo.read(out_file, 'newick')
-    except:
+    except Exception as error:
         print("ERROR: TREE BUILDING FAILED")
+        print(f"ERROR: {error}")
         if os.path.isfile(log_file):
             print("Please see the log file for more details: {}".format(log_file))
         T=None
@@ -206,7 +227,7 @@ def build_fasttree(aln_file, out_file, clean_up=True, nthreads=1, tree_builder_a
 
 def build_iqtree(aln_file, out_file, substitution_model="GTR", clean_up=True, nthreads=1, tree_builder_args=None):
     '''
-    build tree using IQ-Tree with parameters "-fast"
+    build tree using IQ-Tree
     arguments:
         aln_file    file name of input aligment
         out_file    file name to write tree to
@@ -226,10 +247,10 @@ def build_iqtree(aln_file, out_file, substitution_model="GTR", clean_up=True, nt
 
 
     # IQ-tree messes with taxon names. Hence remove offending characters, reinstaniate later
-    tmp_aln_file = aln_file.replace(".fasta", "-delim.fasta")
-    log_file = tmp_aln_file.replace(".fasta", ".iqtree.log")
+    tmp_aln_file = str(Path(aln_file).with_name(Path(aln_file).stem + "-delim.fasta"))
+    log_file = str(Path(tmp_aln_file).with_suffix(".iqtree.log"))
     num_seqs = 0
-    with open(tmp_aln_file, 'w', encoding='utf-8') as ofile, open(aln_file, encoding='utf-8') as ifile:
+    with open_file(tmp_aln_file, 'w') as ofile, open_file(aln_file) as ifile:
         for line in ifile:
             tmp_line = line
             if line.startswith(">"):
@@ -240,13 +261,27 @@ def build_iqtree(aln_file, out_file, substitution_model="GTR", clean_up=True, nt
             ofile.write(tmp_line)
 
     # Check tree builder arguments for conflicts with hardcoded defaults.
-    check_conflicting_args(tree_builder_args, ("-ntmax", "-s", "-m"))
+    check_conflicting_args(tree_builder_args, (
+        # -ntmax/--threads-max are synonyms
+        # see https://github.com/iqtree/iqtree2/blob/74da454bbd98d6ecb8cb955975a50de59785fbde/utils/tools.cpp#L4882-L4883
+        "-ntmax",
+        "--threads-max",
+        # -s/--aln/--msa are synonyms
+        # see https://github.com/iqtree/iqtree2/blob/74da454bbd98d6ecb8cb955975a50de59785fbde/utils/tools.cpp#L2370-L2371
+        "-s",
+        "--aln",
+        "--msa",
+        # --model/-m are synonyms
+        # see https://github.com/iqtree/iqtree2/blob/74da454bbd98d6ecb8cb955975a50de59785fbde/utils/tools.cpp#L3232-L3233
+        "-m",
+        "--model",
+    ))
 
     if substitution_model.lower() != "auto":
-        call = [iqtree, "-ntmax", str(nthreads), "-s", shquote(tmp_aln_file),
-                "-m", substitution_model, tree_builder_args, ">", log_file]
+        call = [iqtree, "--threads-max", str(nthreads), "-s", shquote(tmp_aln_file),
+                "-m", shquote(substitution_model), tree_builder_args, ">", shquote(log_file)]
     else:
-        call = [iqtree, "-ntmax", str(nthreads), "-s", shquote(tmp_aln_file), tree_builder_args, ">", shquote(log_file)]
+        call = [iqtree, "--threads-max", str(nthreads), "-s", shquote(tmp_aln_file), tree_builder_args, ">", shquote(log_file)]
 
     cmd = " ".join(call)
 
@@ -273,8 +308,9 @@ def build_iqtree(aln_file, out_file, substitution_model="GTR", clean_up=True, nt
             for ext in [".bionj",".ckp.gz",".iqtree",".mldist",".model.gz",".treefile",".uniqueseq.phy",".model"]:
                 if os.path.isfile(tmp_aln_file + ext):
                     os.remove(tmp_aln_file + ext)
-    except:
+    except Exception as error:
         print("ERROR: TREE BUILDING FAILED")
+        print(f"ERROR: {error}")
         if os.path.isfile(log_file):
             print("Please see the log file for more details: {}".format(log_file))
         T=None
@@ -337,7 +373,7 @@ def write_out_informative_fasta(compress_seq, alignment, stripFile=None):
 
     #If want a position map, print:
     if printPositionMap:
-        with open(fasta_file+".positions.txt", 'w', encoding='utf-8') as the_file:
+        with open_file(fasta_file+".positions.txt", 'w') as the_file:
             the_file.write("\n".join(pos))
 
     return fasta_file
@@ -375,7 +411,7 @@ def mask_sites_in_multiple_sequence_alignment(alignment_file, excluded_sites_fil
     # Write the masked alignment to disk one record at a time.
     alignment_file_path = Path(alignment_file)
     masked_alignment_file = str(alignment_file_path.parent / ("masked_%s" % alignment_file_path.name))
-    with open(masked_alignment_file, "w", encoding='utf-8') as oh:
+    with open_file(masked_alignment_file, "w") as oh:
         for record in alignment:
             # Convert to a mutable sequence to enable masking with Ns.
             sequence = MutableSeq(str(record.seq))
@@ -396,14 +432,14 @@ def register_parser(parent_subparsers):
     parser.add_argument('--alignment', '-a', required=True, help="alignment in fasta or VCF format")
     parser.add_argument('--method', default='iqtree', choices=["fasttree", "raxml", "iqtree"], help="tree builder to use")
     parser.add_argument('--output', '-o', type=str, help='file name to write tree to')
-    parser.add_argument('--substitution-model', default="GTR",
-                                help='substitution model to use. Specify \'auto\' to run ModelTest. Currently, only available for IQTREE.')
+    parser.add_argument('--substitution-model', default=DEFAULT_SUBSTITUTION_MODEL,
+                                help='substitution model to use. Specify \'auto\' to run ModelTest. Currently, only available for IQ-TREE.')
     parser.add_argument('--nthreads', type=nthreads_value, default=1,
                                 help="maximum number of threads to use; specifying the value 'auto' will cause the number of available CPU cores on your system, if determinable, to be used")
     parser.add_argument('--vcf-reference', type=str, help='fasta file of the sequence the VCF was mapped to')
     parser.add_argument('--exclude-sites', type=str, help='file name of one-based sites to exclude for raw tree building (BED format in .bed files, second column in tab-delimited files, or one position per line)')
     parser.add_argument('--tree-builder-args', type=str, help=f"""arguments to pass to the tree builder either augmenting or overriding the default arguments (except for input alignment path, number of threads, and substitution model).
-    Use the assignment operator (e.g., --tree-builder-args="-czb" for IQ-TREE) to avoid unexpected errors.
+    Use the assignment operator (e.g., --tree-builder-args="--polytomy" for IQ-TREE) to avoid unexpected errors.
     FastTree defaults: "{DEFAULT_ARGS['fasttree']}".
     RAxML defaults: "{DEFAULT_ARGS['raxml']}".
     IQ-TREE defaults: "{DEFAULT_ARGS['iqtree']}".
@@ -451,8 +487,8 @@ def run(args):
     else:
         fasta = aln
 
-    if args.substitution_model and not args.method=='iqtree':
-        print("Cannot specify model unless using IQTree. Model specification ignored.")
+    if args.method != "iqtree" and args.substitution_model is not DEFAULT_SUBSTITUTION_MODEL:
+        print(f"Cannot specify --substitution-model unless using IQ-TREE. Model specification {args.substitution_model!r} ignored.", file=sys.stderr)
 
     # Allow users to keep default args, override them, or augment them.
     if args.tree_builder_args is None:
@@ -477,7 +513,6 @@ def run(args):
     print("\nBuilding original tree took {} seconds".format(str(end-start)))
 
     if T:
-        import json
         tree_success = Phylo.write(T, tree_fname, 'newick', format_branch_length='%1.8f')
     else:
         return 1

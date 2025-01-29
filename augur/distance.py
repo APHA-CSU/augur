@@ -4,8 +4,7 @@ Distance calculations require selection of a comparison method (to determine
 which sequences to compare) and a distance map (to determine the weight of a
 mismatch between any two sequences).
 
-Comparison methods
-==================
+**Comparison methods**
 
 Comparison methods include:
 
@@ -32,14 +31,21 @@ tips sampled from previous seasons prior to the given date. These two date
 parameters allow users to specify a fixed time interval for pairwise
 calculations, limiting the computationally complexity of the comparisons.
 
-Distance maps
-=============
+For all distance calculations, a consecutive series of gap characters (`-`)
+counts as a single difference between any pair of sequences. This behavior
+reflects the assumption that there was an underlying biological process that
+produced the insertion or deletion as a single event as opposed to multiple
+independent insertion/deletion events.
+
+**Distance maps**
 
 Distance maps are defined in JSON format with two required top-level keys.
 The `default` key specifies the numeric (floating point) value to assign to all mismatches by default.
 The `map` key specifies a dictionary of weights to use for distance calculations.
 These weights are indexed hierarchically by gene name and one-based gene coordinate and are assigned in either a sequence-independent or sequence-dependent manner.
-The simplest possible distance map calculates Hamming distance between sequences without any site-specific weights, as shown below::
+The simplest possible distance map calculates Hamming distance between sequences without any site-specific weights, as shown below:
+
+.. code-block:: json
 
     {
         "name": "Hamming distance",
@@ -47,8 +53,23 @@ The simplest possible distance map calculates Hamming distance between sequences
         "map": {}
     }
 
+To ignore specific characters such as gaps or ambiguous nucleotides from the
+distance calculation, define a top-level `ignored_characters` key with a list of
+characters to ignore.
+
+.. code-block:: json
+
+    {
+        "name": "Hamming distance",
+        "default": 1,
+        "ignored_characters": ["-", "N"],
+        "map": {}
+    }
+
 By default, distances are floating point values whose precision can be controlled with the `precision` key that defines the number of decimal places to retain for each distance.
-The following example shows how to specify a precision of two decimal places in the final output.::
+The following example shows how to specify a precision of two decimal places in the final output:
+
+.. code-block:: json
 
     {
         "name": "Hamming distance",
@@ -57,7 +78,9 @@ The following example shows how to specify a precision of two decimal places in 
         "precision": 2
     }
 
-Distances can be reported as integer values by specifying an `output_type` as `integer` or `int` as follows.::
+Distances can be reported as integer values by specifying an `output_type` as `integer` or `int` as follows:
+
+.. code-block:: json
 
     {
         "name": "Hamming distance",
@@ -70,7 +93,9 @@ Sequence-independent distances are defined by gene and position using a numeric
 value of the same type as the default value (integer or float). The following
 example is a distance map for antigenic amino acid substitutions near influenza
 A/H3N2 HA's receptor binding sites. This map calculates the Hamming distance
-between amino acid sequences only at seven positions in the HA1 gene::
+between amino acid sequences only at seven positions in the HA1 gene:
+
+.. code-block:: json
 
     {
         "name": "Koel epitope sites",
@@ -92,7 +117,9 @@ Sequence-dependent distances are defined by gene, position, and sequence pairs
 where the `from` sequence in each pair is interpreted as the ancestral state and
 the `to` sequence as the derived state. The following example is a distance map
 that assigns asymmetric weights to specific amino acid substitutions at a
-specific position in the influenza gene HA1::
+specific position in the influenza gene HA1:
+
+.. code-block:: json
 
     {
         "default": 0.0,
@@ -119,7 +146,9 @@ that can be passed to `augur export`. In addition to the standard `nodes` field,
 the JSON includes a `params` field that describes the mapping of attribute names
 to requested comparisons and distance maps and any date parameters specified by
 the user. The following example JSON shows a sample output when the distance
-command is run with multiple comparisons and distance maps::
+command is run with multiple comparisons and distance maps:
+
+.. code-block:: json
 
     {
         "params": {
@@ -153,11 +182,12 @@ from collections import defaultdict
 import copy
 from itertools import chain
 import json
-import numpy as np
 import pandas as pd
 import sys
 
+from .argparse_ import ExtendOverwriteDefault
 from .frequency_estimators import timestamp_to_float
+from .io.file import open_file
 from .reconstruct_sequences import load_alignments
 from .utils import annotate_parents_for_tree, first_line, read_node_data, write_json
 
@@ -177,14 +207,15 @@ def read_distance_map(map_file):
     dict :
         Python representation of the distance map JSON
 
-
+    Examples
+    --------
     >>> sorted(read_distance_map("tests/data/distance_map_weight_per_site.json").items())
     [('default', 0), ('map', {'HA1': {144: 1}})]
     >>> sorted(read_distance_map("tests/data/distance_map_weight_per_site_and_sequence.json").items())
     [('default', 0.0), ('map', {'SigPep': {0: {('W', 'P'): -8.3}}})]
     """
     # Load the JSON.
-    with open(map_file, "r", encoding='utf-8') as fh:
+    with open_file(map_file, "r") as fh:
         json_distance_map = json.load(fh)
 
     # Confirm that all required fields are present.
@@ -237,7 +268,8 @@ def get_distance_between_nodes(node_a_sequences, node_b_sequences, distance_map,
     float :
         distance between node sequences based on the given map
 
-
+    Examples
+    --------
     >>> node_a_sequences = {"gene": "ACTG"}
     >>> node_b_sequences = {"gene": "ACGG"}
     >>> distance_map = {"default": 0, "map": {}}
@@ -465,7 +497,7 @@ def get_distances_to_root(tree, sequences_by_node_and_gene, distance_map):
 
     Parameters
     ----------
-    tree : Bio.Phylo
+    tree : Bio.Phylo.BaseTree.Tree
         a rooted tree whose node names match the given dictionary of sequences
         by node and gene
 
@@ -505,7 +537,7 @@ def get_distances_to_last_ancestor(tree, sequences_by_node_and_gene, distance_ma
 
     Parameters
     ----------
-    tree : Bio.Phylo
+    tree : Bio.Phylo.BaseTree.Tree
         a rooted tree whose node names match the given dictionary of sequences
         by node and gene
 
@@ -565,7 +597,7 @@ def get_distances_to_all_pairs(tree, sequences_by_node_and_gene, distance_map, e
 
     Parameters
     ----------
-    tree : Bio.Phylo
+    tree : Bio.Phylo.BaseTree.Tree
         a rooted tree whose node names match the given dictionary of sequences
         by node and gene
 
@@ -629,11 +661,11 @@ def get_distances_to_all_pairs(tree, sequences_by_node_and_gene, distance_map, e
 def register_parser(parent_subparsers):
     parser = parent_subparsers.add_parser("distance", help=first_line(__doc__))
     parser.add_argument("--tree", help="Newick tree", required=True)
-    parser.add_argument("--alignment", nargs="+", help="sequence(s) to be used, supplied as FASTA files", required=True)
-    parser.add_argument('--gene-names', nargs="+", type=str, help="names of the sequences in the alignment, same order assumed", required=True)
-    parser.add_argument("--attribute-name", nargs="+", help="name to store distances associated with the given distance map; multiple attribute names are linked to corresponding positional comparison method and distance map arguments", required=True)
-    parser.add_argument("--compare-to", nargs="+", choices=["root", "ancestor", "pairwise"], help="type of comparison between samples in the given tree including comparison of all nodes to the root (root), all tips to their last ancestor from a previous season (ancestor), or all tips from the current season to all tips in previous seasons (pairwise)", required=True)
-    parser.add_argument("--map", nargs="+", help="JSON providing the distance map between sites and, optionally, sequences present at those sites; the distance map JSON minimally requires a 'default' field defining a default numeric distance and a 'map' field defining a dictionary of genes and one-based coordinates", required=True)
+    parser.add_argument("--alignment", nargs="+", action=ExtendOverwriteDefault, help="sequence(s) to be used, supplied as FASTA files", required=True)
+    parser.add_argument('--gene-names', nargs="+", action=ExtendOverwriteDefault, type=str, help="names of the sequences in the alignment, same order assumed", required=True)
+    parser.add_argument("--attribute-name", nargs="+", action=ExtendOverwriteDefault, help="name to store distances associated with the given distance map; multiple attribute names are linked to corresponding positional comparison method and distance map arguments", required=True)
+    parser.add_argument("--compare-to", nargs="+", action=ExtendOverwriteDefault, choices=["root", "ancestor", "pairwise"], help="type of comparison between samples in the given tree including comparison of all nodes to the root (root), all tips to their last ancestor from a previous season (ancestor), or all tips from the current season to all tips in previous seasons (pairwise)", required=True)
+    parser.add_argument("--map", nargs="+", action=ExtendOverwriteDefault, help="JSON providing the distance map between sites and, optionally, sequences present at those sites; the distance map JSON minimally requires a 'default' field defining a default numeric distance and a 'map' field defining a dictionary of genes and one-based coordinates", required=True)
     parser.add_argument("--date-annotations", help="JSON of branch lengths and date annotations from augur refine for samples in the given tree; required for comparisons to earliest or latest date")
     parser.add_argument("--earliest-date", help="earliest date at which samples are considered to be from previous seasons (e.g., 2019-01-01). This date is only used in pairwise comparisons. If omitted, all samples prior to the latest date will be considered.")
     parser.add_argument("--latest-date", help="latest date at which samples are considered to be from previous seasons (e.g., 2019-01-01); samples from any date after this are considered part of the current season")

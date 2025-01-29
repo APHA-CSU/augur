@@ -1,9 +1,6 @@
 import os
-import logging
 import numpy as np
-import time
 from collections import defaultdict
-import pandas as pd
 from pprint import pprint
 import sys
 
@@ -32,50 +29,51 @@ class TiterCollection(object):
 
         Returns
         -------
-        tuple (dict, list, list)
+        tuple
             tuple of a dict of titer measurements, list of strains, list of sources
 
-
+        Examples
+        --------
         >>> measurements, strains, sources = TiterCollection.load_from_file("tests/data/titer_model/h3n2_titers_subset.tsv")
         >>> type(measurements)
         <class 'dict'>
         >>> len(measurements)
-        11
+        248
         >>> len(strains)
-        13
+        62
         >>> len(sources)
-        5
+        15
 
         Inspect specific measurements. First, inspect a measurement that has a
         specific value in the input.
 
-        >>> measurements[("A/Acores/11/2013", ("A/Alabama/5/2010", "F27/10"))]
-        [80.0]
+        >>> measurements[("A/Wisconsin/3/2007", ("A/Wisconsin/3/2007", "A/Wis3/07"))]
+        [5120.0]
 
         Next, inspect a measurement that has a thresholded value at the lower
-        bound of detection (e.g., "<80"). This measurement should be reported as
-        one half of its threshold value (e.g., 40.0).
+        bound of detection (e.g., "<40"). This measurement should be reported as
+        one half of its threshold value (e.g., 20.0).
 
-        >>> measurements[("A/Acores/11/2013", ("A/Victoria/208/2009", "F7/10"))]
-        [40.0]
+        >>> measurements[("A/HongKong/1/1968", ("A/Victoria/3/1975", "A/Vic/3/75"))]
+        [20.0]
 
         Inspect a measurement that has a thresholded value at the upper bound of
-        detection (">1280"). This measurement should be reported as twice its
-        threshold value (e.g., 2560.0).
+        detection (">5120"). This measurement should be reported as twice its
+        threshold value (e.g., 10240.0).
 
-        >>> measurements[("A/Acores/SU43/2012", ("A/Texas/50/2012", "F36/12"))]
-        [2560.0]
+        >>> measurements[("A/Wisconsin/3/2007", ("A/Uruguay/716/2007", "A/Uru716/07"))]
+        [10240.0]
 
         Confirm that excluding sources produces fewer measurements.
 
-        >>> measurements, strains, sources = TiterCollection.load_from_file("tests/data/titer_model/h3n2_titers_subset.tsv", excluded_sources=["NIMR_Sep2013_7-11.csv"])
+        >>> measurements, strains, sources = TiterCollection.load_from_file("tests/data/titer_model/h3n2_titers_subset.tsv", excluded_sources=["Hay2001"])
         >>> len(measurements)
-        5
+        223
 
         Request measurements for a test/reference/serum tuple that should not
         exist after excluding its source.
 
-        >>> measurements.get(("A/Acores/11/2013", ("A/Alabama/5/2010", "F27/10")))
+        >>> measurements.get(("A/HongKong/1/1968", ("A/HongKong/1/1968", "A/HK/1/68")))
         >>>
 
         Missing titer data should produce an error.
@@ -139,7 +137,7 @@ class TiterCollection(object):
 
         Parameters
         ----------
-        titers : defaultdict
+        titers : collections.defaultdict
             titer measurements indexed by test, reference,
             and serum
 
@@ -148,15 +146,14 @@ class TiterCollection(object):
         dict
             number of measurements per strain
 
-
+        Examples
+        --------
         >>> measurements, strains, sources = TiterCollection.load_from_file("tests/data/titer_model/h3n2_titers_subset.tsv")
         >>> titer_counts = TiterCollection.count_strains(measurements)
-        >>> titer_counts["A/Acores/11/2013"]
-        6
-        >>> titer_counts["A/Acores/SU43/2012"]
-        3
-        >>> titer_counts["A/Cairo/63/2012"]
-        2
+        >>> titer_counts["A/Auckland/6/2003"]
+        4
+        >>> titer_counts["A/Brisbane/9/2006"]
+        15
         """
         counts = defaultdict(int)
         for key in titers.keys():
@@ -184,25 +181,30 @@ class TiterCollection(object):
             reduced dictionary of titer measurements containing only those were
             test and reference virus are part of the strain list
 
-
+        Examples
+        --------
         >>> measurements, strains, sources = TiterCollection.load_from_file("tests/data/titer_model/h3n2_titers_subset.tsv")
         >>> len(measurements)
-        11
+        248
 
         Test the case when a test strain exists in the subset but the none of
         its corresponding reference strains do.
 
-        >>> len(TiterCollection.filter_strains(measurements, ["A/Acores/11/2013"]))
+        >>> len(TiterCollection.filter_strains(measurements, ["A/Oslo/244/1997"]))
         0
 
-        Test when both the test and reference strains exist in the subset.
+        Test when both the test and reference strains exist in the subset. This
+        first test gets a heterologous pair (first and second strain) and the
+        autologous pair for the second strain.
 
-        >>> len(TiterCollection.filter_strains(measurements, ["A/Acores/11/2013", "A/Alabama/5/2010", "A/Athens/112/2012"]))
+        >>> len(TiterCollection.filter_strains(measurements, ["A/Oslo/244/1997", "A/Johannesburg/33/1994"]))
         2
-        >>> len(TiterCollection.filter_strains(measurements, ["A/Acores/11/2013", "A/Acores/SU43/2012", "A/Alabama/5/2010", "A/Athens/112/2012"]))
-        3
+
+        Test when no strains are provided.
+
         >>> len(TiterCollection.filter_strains(measurements, []))
         0
+
         """
         return {key: value for key, value in titers.items()
                 if key[0] in strains and key[1][0] in strains}
@@ -214,10 +216,8 @@ class TiterCollection(object):
 
         Parameters
         ----------
-        titers : TYPE
-            Description
+        titers
         **kwargs
-            Description
         """
         self.kwargs = kwargs
 
@@ -228,7 +228,7 @@ class TiterCollection(object):
         else:
             self.titers = titers
             strain_counts = type(self).count_strains(titers)
-            self.strains = strain_counts.keys()
+            self.strains = list(strain_counts.keys())
 
     def read_titers(self, fname):
         self.titer_fname = fname
@@ -248,15 +248,8 @@ class TiterCollection(object):
 
         Parameters
         ----------
-        ref : TYPE
-            Description
-        val : TYPE
-            Description
-
-        Returns
-        -------
-        TYPE
-            Description
+        ref
+        val
         '''
         consensus_func = np.mean
         return consensus_func(np.log2(self.autologous_titers[ref]['val'])) \
@@ -321,25 +314,21 @@ class TiterCollection(object):
         make lists of reference viruses, test viruses and sera
         (there are often multiple sera per reference virus)
 
+        Examples
+        --------
         >>> measurements, strains, sources = TiterCollection.load_from_file("tests/data/titer_model/h3n2_titers_subset.tsv")
         >>> titers = TiterCollection(measurements)
         >>> sera, ref_strains, test_strains = titers.strain_census(measurements)
         >>> len(sera)
-        9
+        66
         >>> len(ref_strains)
-        9
+        27
         >>> len(test_strains)
-        13
+        62
 
         Parameters
         ----------
-        titers : TYPE
-            Description
-
-        Returns
-        -------
-        TYPE
-            Description
+        titers
         """
         sera = set()
         ref_strains = set()
@@ -428,7 +417,7 @@ class TiterModel(object):
                 from random import sample
                 tmp = set(self.test_strains)
                 tmp.difference_update(self.ref_strains) # don't use references viruses in the set to sample from
-                training_strains = sample(tmp, int(training_fraction*len(tmp)))
+                training_strains = sample(sorted(tmp), int(training_fraction*len(tmp)))
                 for tmpstrain in self.ref_strains:      # add all reference viruses to the training set
                     if tmpstrain not in training_strains:
                         training_strains.append(tmpstrain)
@@ -459,15 +448,10 @@ class TiterModel(object):
         Parameters
         ----------
         method : str, optional
-            Description
         lam_drop : float, optional
-            Description
         lam_pot : float, optional
-            Description
         lam_avi : float, optional
-            Description
         **kwargs
-            Description
         '''
         self.lam_pot = lam_pot
         self.lam_avi = lam_avi
@@ -510,18 +494,9 @@ class TiterModel(object):
         Parameters
         ----------
         plot : bool, optional
-            Description
         cutoff : float, optional
-            Description
         validation_set : None, optional
-            Description
         fname : None, optional
-            Description
-
-        Returns
-        -------
-        TYPE
-            Description
         '''
         from scipy.stats import linregress, pearsonr
         if validation_set is None:
@@ -531,7 +506,7 @@ class TiterModel(object):
             pred_titer = self.predict_titer(key[0], key[1], cutoff=cutoff)
             validation[key] = (val, pred_titer)
 
-        validation_array = np.array(validation.values())
+        validation_array = np.array(list(validation.values()))
         actual = validation_array[:,0]
         predicted = validation_array[:,1]
 
@@ -544,7 +519,7 @@ class TiterModel(object):
                         'rms_error': np.sqrt(np.mean((actual-predicted)**2)),
         }
         pprint(model_performance)
-        model_performance['values'] = validation.values()
+        model_performance['values'] = list(validation.values())
 
         self.validation = model_performance
 
@@ -592,11 +567,6 @@ class TiterModel(object):
         during visualization, we need the average distance of a test virus from
         a reference virus across sera. hence the hierarchy [ref][test][serum]
         NOTE: this uses node.name instead of node.clade
-
-        Returns
-        -------
-        TYPE
-            Description
         '''
         def dstruct():
             return defaultdict(dict)
@@ -614,11 +584,6 @@ class TiterModel(object):
         compile a json structure containing potencies for visualization
         we need rapid access to all sera for a given reference virus, hence
         the structure is organized by [ref][serum]
-
-        Returns
-        -------
-        TYPE
-            Description
         '''
         potency_json = defaultdict(dict)
         for (ref_clade, serum), val in self.serum_potency.items():
@@ -639,11 +604,6 @@ class TiterModel(object):
     def compile_virus_effects(self):
         '''
         compile a json structure containing virus_effects for visualization
-
-        Returns
-        -------
-        TYPE
-            Description
         '''
         return {test_vir:np.round(val,TITER_ROUND) for test_vir, val in self.virus_effect.items()}
 
@@ -654,11 +614,6 @@ class TiterModel(object):
     def fit_l1reg(self):
         '''
         regularize genetic parameters with an l1 norm regardless of sign
-
-        Returns
-        -------
-        TYPE
-            Description
         '''
         try:
             from cvxopt import matrix, solvers
@@ -718,11 +673,6 @@ class TiterModel(object):
 
     def fit_nnl1reg(self):
         '''l1 regularization of titer drops with non-negativity constraints
-
-        Returns
-        -------
-        TYPE
-            Description
         '''
         try:
             from cvxopt import matrix, solvers
@@ -807,15 +757,8 @@ class TreeModel(TiterModel):
 
         Parameters
         ----------
-        n : TYPE
-            Description
+        n
         **kwargs
-            Description
-
-        Returns
-        -------
-        TYPE
-            Description
         '''
 
         model_performance = []
@@ -843,15 +786,8 @@ class TreeModel(TiterModel):
 
         Parameters
         ----------
-        v1 : TYPE
-            Description
-        v2 : TYPE
-            Description
-
-        Returns
-        -------
-        TYPE
-            Description
+        v1
+        v2
         '''
         if v1 in self.strain_lookup and v2 in self.strain_lookup:
             p1 = [self.strain_lookup[v1]]
@@ -881,7 +817,6 @@ class TreeModel(TiterModel):
         Parameters
         ----------
         criterium : None, optional
-            Description
         '''
         if criterium is None:
             criterium = lambda x:True
@@ -1029,15 +964,8 @@ class SubstitutionModel(TiterModel):
 
         Parameters
         ----------
-        strain1 : TYPE
-            Description
-        strain2 : TYPE
-            Description
-
-        Returns
-        -------
-        TYPE
-            Description
+        strain1
+        strain2
         '''
         if strain1 in self.sequences and strain2 in self.sequences:
             muts = []
@@ -1084,7 +1012,6 @@ class SubstitutionModel(TiterModel):
         Parameters
         ----------
         colin_thres : int, optional
-            Description
         '''
         seq_graph = []
         titer_dist = []
@@ -1134,8 +1061,7 @@ class SubstitutionModel(TiterModel):
 
         Parameters
         ----------
-        colin_thres : TYPE
-            Description
+        colin_thres
         '''
         TT = self.design_matrix[:,:self.genetic_params].T
         mutation_clusters = []
@@ -1170,7 +1096,6 @@ class SubstitutionModel(TiterModel):
         Parameters
         ----------
         **kwargs
-            Description
         '''
         self._train(**kwargs)
         for mi, mut in enumerate(self.relevant_muts):
@@ -1195,12 +1120,6 @@ class SubstitutionModel(TiterModel):
         Parameters
         ----------
         cutoff : float, optional
-            Description
-
-        Returns
-        -------
-        TYPE
-            Description
         '''
         return {mut[0]+':'+mut[1]:np.round(val,int(-np.log10(cutoff)))
                 for mut, val in self.substitution_effect.items() if val>cutoff}
@@ -1211,11 +1130,11 @@ class SubstitutionModel(TiterModel):
 
         Parameters
         ----------
-        tree : Bio.Phylo
+        tree : Bio.Phylo.BaseTree.Tree
 
         Returns
         -------
-        Bio.Phylo
+        Bio.Phylo.BaseTree.Tree
             input tree instance with nodes annotated by per-branch and
             cumulative antigenic advance attributes `dTiterSub` and
             `cTiterSub`
@@ -1225,7 +1144,7 @@ class SubstitutionModel(TiterModel):
         for node in tree.find_clades():
             for child in node.clades:
                 # Get mutations between the current node and its parent.
-                mutations = self.get_mutations(child.name, node.name)
+                mutations = self.get_mutations(node.name, child.name)
 
                 # Calculate titer drop on the branch to the current node.
                 child.dTiterSub = 0
@@ -1236,16 +1155,3 @@ class SubstitutionModel(TiterModel):
                 child.cTiterSub = node.cTiterSub + child.dTiterSub
 
         return tree
-
-
-if __name__=="__main__":
-    # test tree model (assumes there is a tree called flu in memory...)
-    ttm = TreeModel(flu.tree.tree, flu.titers)
-    ttm.prepare(training_fraction=0.8)
-    ttm.train(method='nnl1reg')
-    ttm.validate(plot=True)
-
-    tsm = SubstitutionModel(flu.tree.tree, flu.titers)
-    tsm.prepare(training_fraction=0.8)
-    tsm.train(method='nnl1reg')
-    tsm.validate(plot=True)
