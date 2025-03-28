@@ -236,7 +236,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - { pathogen: avian-flu, build-args: --configfile config/gisaid.yaml -pf test_target }
           - { pathogen: ebola }
           - { pathogen: mumps }
           - {
