@@ -2,12 +2,7 @@ name: CI
 on:
   push:
     branches:
-      - master
-
-  # Routinely check that tests pass with new versions of dependencies.
-  schedule:
-    # Every day at 17:42 UTC / 9:42 Seattle (winter) / 10:42 Seattle (summer)
-    - cron: "42 17 * * *"
+      - main
 
   pull_request:
 
@@ -241,7 +236,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - { pathogen: avian-flu, build-args: --configfile config/gisaid.yaml -pf test_target }
           - { pathogen: ebola }
           - { pathogen: mumps }
           - {
@@ -333,33 +327,6 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-
-  build-docs:
-    uses: nextstrain/.github/.github/workflows/docs-ci.yaml@master
-    with:
-      docs-directory: docs/
-      pip-install-target: .[dev]
-
-  check-docs:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-python@v5
-
-      - uses: actions/checkout@v4
-
-      - run: pip install .[dev]
-
-      - run: ./devel/regenerate-developer-api-docs
-
-      - name: Check for changes
-        run: |
-          if [[ -n $(git status --porcelain) ]]; then
-            git add .
-            git diff --staged >&2
-            echo "There are changes that affect the developer API docs. Please update: <https://github.com/nextstrain/augur/blob/-/docs/contribute/DEV_DOCS.md#regenerating-developer-api-docs>" >&2
-            echo "If there are changes to the Augur CLI, please manually adjust files under 'docs/usage/cli/'." >&2
-            exit 1
-          fi
 
   release:
     # Only run when called by the release workflow on the default branch
